@@ -1,0 +1,12 @@
+{
+  "domain": "ledvance_wifi",
+  "name": "Ledvance Smart+ WiFi",
+  "codeowners": ["@Antonio112009"],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/antonio112009/ha-ledvance-lights",
+  "integration_type": "device",
+  "iot_class": "local_polling",
+  "requirements": ["tinytuya>=1.15.1"],
+  "version": "1.0.0"
+}

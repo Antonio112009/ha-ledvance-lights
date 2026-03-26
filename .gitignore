@@ -1,0 +1,24 @@
+# Dependencies (external)
+tinytuya-repo/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# macOS
+.DS_Store
+
+# IDE / Editor
+.vscode/
+.idea/
+
+# Agent config
+.claude/
+
+# Scratch files
+ledvance.py
