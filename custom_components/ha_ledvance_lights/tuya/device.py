@@ -395,6 +395,12 @@ class TuyaDevice:
             return {}
 
         try:
+            # Strip retcode prefix (4 unencrypted bytes added by unpack_message)
+            if len(payload) >= 4:
+                retcode = struct.unpack(">I", payload[:4])[0]
+                if retcode in (0, 1, 2, 3):
+                    payload = payload[4:]
+
             if msg.prefix == PREFIX_6699:
                 # v3.5: already decrypted by unpack_message
                 pass
@@ -407,15 +413,9 @@ class TuyaDevice:
                     payload = payload[15:]
                 payload = aes_ecb_decrypt(self.local_key, payload)
 
-            # Strip version header if still present
+            # Strip version header if still present after decryption
             if payload[:3] in (b"3.3", b"3.4", b"3.5"):
                 payload = payload[15:]
-
-            # Strip retcode if present
-            if len(payload) >= 4:
-                retcode = struct.unpack(">I", payload[:4])[0]
-                if retcode in (0, 1, 2, 3):
-                    payload = payload[4:]
 
             # Parse JSON
             text = payload.decode("utf-8", errors="ignore").strip()

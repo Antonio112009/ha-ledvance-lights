@@ -20,7 +20,8 @@ from .const import (
     ERR_OFFLINE,
     ERR_PAYLOAD,
 )
-from .tuya import TuyaDevice, scan_devices
+from .tuya import TuyaDevice
+from .tuya.scanner import detect_version, scan_devices, scan_devices_udp
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -47,13 +48,25 @@ class ConnectionResult:
 
 
 def _test_connection(data: dict[str, Any]) -> ConnectionResult:
-    """Test connection, auto-detect protocol version, return DPS on success."""
-    last_error: str | None = None
+    """Test connection, auto-detect protocol version, return DPS on success.
 
-    for version in PROTOCOL_VERSIONS:
+    Uses version detection to try the most likely version first, then falls
+    back to trying all versions if needed.
+    """
+    last_error: str | None = None
+    ip = data[CONF_IP_ADDRESS]
+
+    # Detect version first — puts the right version at the front of the list
+    detected = detect_version(ip)
+    if detected and detected in PROTOCOL_VERSIONS:
+        versions_to_try = [detected] + [v for v in PROTOCOL_VERSIONS if v != detected]
+    else:
+        versions_to_try = list(PROTOCOL_VERSIONS)
+
+    for version in versions_to_try:
         device = TuyaDevice(
             dev_id=data[CONF_DEVICE_ID],
-            address=data[CONF_IP_ADDRESS],
+            address=ip,
             local_key=data[CONF_LOCAL_KEY],
             version=version,
         )
@@ -94,11 +107,14 @@ class LedvanceWifiConfigFlow(ConfigFlow, domain=DOMAIN):
         self._selected_device: dict | None = None
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        """Initial step — choose scan (with optional network) or manual."""
+        """Initial step — choose scan or manual entry.
+
+        Optionally accepts a network (CIDR/range) for cross-VLAN TCP scanning.
+        If no network is given, only UDP broadcast (same subnet) is used.
+        """
         if user_input is not None:
             action = user_input.get("action", "manual")
             if action == "scan":
-                # Store network for the scan step
                 self._scan_network = user_input.get("network", "").strip() or None
                 return await self.async_step_scan()
             return await self.async_step_manual()
@@ -119,7 +135,11 @@ class LedvanceWifiConfigFlow(ConfigFlow, domain=DOMAIN):
         )
 
     async def async_step_scan(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        """Scan the network for Tuya devices."""
+        """Scan the network for Tuya devices.
+
+        Uses UDP broadcast for same-subnet discovery, plus TCP probing if
+        a network (CIDR/range) was specified for cross-VLAN scanning.
+        """
         if user_input is not None:
             # User selected a device from the scan results
             selected_id = user_input.get("device")
@@ -135,30 +155,35 @@ class LedvanceWifiConfigFlow(ConfigFlow, domain=DOMAIN):
                 if self._selected_device:
                     return await self.async_step_credentials()
 
-        # Run the scan
+        # Scan: UDP broadcast + optional TCP probe for cross-VLAN
+        network = getattr(self, "_scan_network", None)
         try:
-            network = getattr(self, "_scan_network", None)
-            self._discovered_devices = await self.hass.async_add_executor_job(
-                scan_devices, 10.0, network
-            )
+            if network:
+                # Full scan: UDP + TCP for the specified network
+                self._discovered_devices = await self.hass.async_add_executor_job(
+                    scan_devices, 10.0, network
+                )
+            else:
+                # UDP-only scan (same subnet)
+                self._discovered_devices = await self.hass.async_add_executor_job(
+                    scan_devices_udp, 8.0
+                )
         except Exception:
             _LOGGER.exception("Error scanning for devices")
             self._discovered_devices = []
 
         if not self._discovered_devices:
-            # No devices found — go straight to manual entry
             return await self.async_step_manual(_show_scan_failed=True)
 
         # Build device selection list
         device_options = {}
         for d in self._discovered_devices:
-            discovered_via = d.get("discovered_via", "udp")
-            if discovered_via == "tcp_probe":
-                # TCP probe: no device ID, show IP only
+            is_tcp = d.get("discovered_via") == "tcp_probe"
+            if is_tcp:
                 key = f"tcp_{d['ip']}"
-                label = f"{d['ip']} (found via network scan)"
+                ver = f"v{d['version']}" if d.get("version", "unknown") != "unknown" else ""
+                label = f"{d['ip']} {ver} (TCP scan)".strip()
             else:
-                # UDP broadcast: has device ID and version
                 key = d["id"]
                 label = f"{d['ip']} (v{d['version']}) — {d['id'][-8:]}"
             device_options[key] = label
@@ -176,11 +201,11 @@ class LedvanceWifiConfigFlow(ConfigFlow, domain=DOMAIN):
         dev = self._selected_device or {}
         ip = dev.get("ip", "unknown")
         dev_id = dev.get("id", "")
-        is_tcp_probe = dev.get("discovered_via") == "tcp_probe"
+        is_tcp = dev.get("discovered_via") == "tcp_probe"
 
-        # TCP probe devices need both device_id and local_key
-        # UDP discovered devices only need local_key
-        if is_tcp_probe:
+        # TCP-discovered devices need device_id + local_key
+        # UDP-discovered devices already have device ID — only need the local key
+        if is_tcp:
             schema = vol.Schema(
                 {
                     vol.Required(CONF_DEVICE_ID): str,

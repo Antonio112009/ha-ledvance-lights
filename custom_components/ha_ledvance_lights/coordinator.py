@@ -79,24 +79,24 @@ class LedvanceDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         hsv_hex: str | None = None,
         scene_num: int | None = None,
     ) -> None:
-        """Turn on and set attributes in a single executor job."""
+        """Turn on and set attributes in a single command.
 
-        def _send() -> None:
-            self.device.set_status(True, DP_POWER)
+        Batches all DP changes into one set_multiple_values call to avoid
+        multiple TCP connections.
+        """
+        dps: dict[str, Any] = {str(DP_POWER): True}
 
-            if scene_num is not None:
-                self.device.set_value(DP_SCENE_NUM, scene_num)
-                return
+        if scene_num is not None:
+            dps[str(DP_SCENE_NUM)] = scene_num
+        elif hsv_hex is not None:
+            dps[str(DP_MODE)] = "colour"
+            dps[str(DP_COLOR_HSV)] = hsv_hex
+        elif color_temp is not None:
+            dps[str(DP_MODE)] = "white"
+            dps[str(DP_COLOR_TEMP)] = color_temp
 
-            if hsv_hex is not None:
-                self.device.set_value(DP_MODE, "colour")
-                self.device.set_value(DP_COLOR_HSV, hsv_hex)
-            elif color_temp is not None:
-                self.device.set_value(DP_MODE, "white")
-                self.device.set_value(DP_COLOR_TEMP, color_temp)
+        if brightness is not None:
+            dps[str(DP_BRIGHTNESS)] = brightness
 
-            if brightness is not None:
-                self.device.set_value(DP_BRIGHTNESS, brightness)
-
-        await self.hass.async_add_executor_job(_send)
+        await self.hass.async_add_executor_job(self.device.set_multiple_values, dps)
         await self.async_request_refresh()

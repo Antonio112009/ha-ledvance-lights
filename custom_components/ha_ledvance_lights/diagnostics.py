@@ -20,6 +20,7 @@ from .const import (
     DP_SCENE,
     DP_SCENE_NUM,
     VERSION,
+    parse_hsv_hex,
     tuya_brightness_to_ha,
     tuya_ct_to_kelvin,
 )
@@ -82,19 +83,18 @@ def _format_device_status(dps: dict[str, Any] | None) -> dict[str, Any]:
     # Color HSV
     color_hsv = dps.get(str(DP_COLOR_HSV))
     if color_hsv is not None:
-        formatted["color_hsv"] = {
-            "raw_hex": color_hsv,
-        }
+        hsv_info: dict[str, Any] = {"raw_hex": color_hsv}
         if isinstance(color_hsv, str) and len(color_hsv) >= 12:
             try:
-                h = int(color_hsv[0:4], 16)
-                s = int(color_hsv[4:8], 16)
-                v = int(color_hsv[8:12], 16)
-                formatted["color_hsv"]["hue"] = h
-                formatted["color_hsv"]["saturation"] = round(s / 10, 1)
-                formatted["color_hsv"]["value"] = round(v / 10, 1)
+                h, s = parse_hsv_hex(color_hsv)
+                v_raw = int(color_hsv[8:12], 16)
+                hsv_info["hue"] = h
+                hsv_info["saturation"] = s
+                hsv_info["value_raw"] = v_raw
+                hsv_info["value_percent"] = round(v_raw / 10, 1)
             except ValueError:
                 pass
+        formatted["color_hsv"] = hsv_info
 
     # Scene
     scene_num = dps.get(str(DP_SCENE_NUM))
@@ -151,6 +151,24 @@ async def async_get_config_entry_diagnostics(
     if hasattr(coordinator, "last_exception") and coordinator.last_exception:
         health["last_error"] = str(coordinator.last_exception)
 
+    # Count known vs unknown DPs
+    dp_summary: dict[str, Any] = {}
+    if coordinator.data:
+        known_dp_keys = {
+            str(dp)
+            for dp in (
+                DP_POWER, DP_MODE, DP_BRIGHTNESS, DP_COLOR_TEMP,
+                DP_COLOR_HSV, DP_SCENE, DP_SCENE_NUM, DP_MUSIC,
+            )
+        }
+        all_keys = set(coordinator.data.keys())
+        dp_summary = {
+            "total": len(all_keys),
+            "known": len(all_keys & known_dp_keys),
+            "unknown": len(all_keys - known_dp_keys),
+            "dp_map": {k: DP_NAMES.get(k, f"unknown_dp_{k}") for k in sorted(all_keys)},
+        }
+
     return {
         "integration_version": VERSION,
         "config_entry": async_redact_data(dict(entry.data), TO_REDACT_CONFIG),
@@ -160,6 +178,7 @@ async def async_get_config_entry_diagnostics(
             "protocol_version": entry.data.get(CONF_PROTOCOL_VERSION),
         },
         "health": health,
+        "data_points": dp_summary,
         "device_status": _format_device_status(coordinator.data),
         "raw_dps": coordinator.data,
     }

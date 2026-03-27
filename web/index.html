@@ -178,6 +178,44 @@
             vertical-align: middle;
             margin-left: 8px;
         }
+        .color-wheel-wrap {
+            position: relative;
+            width: 220px;
+            height: 220px;
+            margin: 12px auto 8px;
+        }
+        .color-wheel {
+            width: 220px;
+            height: 220px;
+            border-radius: 50%;
+            cursor: crosshair;
+            border: 2px solid var(--border);
+        }
+        .color-wheel-cursor {
+            position: absolute;
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            border: 3px solid #fff;
+            box-shadow: 0 0 4px rgba(0,0,0,.6);
+            pointer-events: none;
+            transform: translate(-50%, -50%);
+        }
+        .color-selected-bar {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            margin-top: 4px;
+            font-size: 0.82rem;
+            color: var(--muted);
+        }
+        .color-selected-swatch {
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            border: 2px solid var(--border);
+        }
         .hidden { display: none; }
         .checkbox-label {
             display: flex;
@@ -252,38 +290,25 @@
 
             <label>Brightness</label>
             <div class="slider-row">
-                <input type="range" id="brightness" min="0" max="255" value="128"
-                       oninput="document.getElementById('bval').textContent=this.value">
+                <input type="range" id="brightness" min="0" max="255" value="128">
                 <span class="val" id="bval">128</span>
             </div>
-            <button class="btn-primary btn-small" onclick="setBrightness()">Set Brightness</button>
 
             <label>Color Temperature</label>
             <div class="slider-row">
-                <input type="range" id="ct" min="2700" max="6500" value="4000"
-                       oninput="document.getElementById('ctval').textContent=this.value+'K'">
+                <input type="range" id="ct" min="2700" max="6500" value="4000">
                 <span class="val" id="ctval">4000K</span>
             </div>
-            <button class="btn-primary btn-small" onclick="setColorTemp()">Set Color Temp</button>
 
-            <label>Color (HS)</label>
-            <div class="row">
-                <div>
-                    <label for="hue">Hue (0-360)</label>
-                    <input type="number" id="hue" min="0" max="360" value="0"
-                           oninput="updateColorPreview()">
-                </div>
-                <div>
-                    <label for="sat">Sat (0-100)</label>
-                    <input type="number" id="sat" min="0" max="100" value="100"
-                           oninput="updateColorPreview()">
-                </div>
-                <div style="flex:0">
-                    <label>&nbsp;</label>
-                    <div id="color-preview" class="color-preview" style="background:hsl(0,100%,50%)"></div>
-                </div>
+            <label>Color</label>
+            <div class="color-wheel-wrap">
+                <canvas id="color-wheel" class="color-wheel" width="220" height="220"></canvas>
+                <div id="color-cursor" class="color-wheel-cursor" style="left:110px;top:110px"></div>
             </div>
-            <button class="btn-primary btn-small" onclick="setColor()">Set Color</button>
+            <div class="color-selected-bar">
+                <div id="color-swatch" class="color-selected-swatch" style="background:#f00"></div>
+                <span id="color-label">H: 0° S: 100%</span>
+            </div>
         </div>
 
         <!-- Scanner Card -->
@@ -417,46 +442,166 @@
                 return;
             }
             log('Auto-detecting protocol version...', 'log-info');
-            for (const ver of ['3.5', '3.4', '3.3']) {
-                document.getElementById('version').value = ver;
-                log(`Trying version ${ver}...`, 'log-info');
-                const result = await apiCall('/api/status');
-                if (result && result.dps) {
-                    log(`✓ Detected version ${ver}!`, 'log-ok');
-                    updateStatusDisplay(result);
-                    return;
+            try {
+                const resp = await fetch('/api/detect_version', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(creds),
+                });
+                const result = await resp.json();
+                if (result.hint) {
+                    log(`Probe hint: v${result.hint}`, 'log-info');
                 }
+                if (result.version) {
+                    document.getElementById('version').value = result.version;
+                    log(`✓ Detected version ${result.version}!`, 'log-ok');
+                    if (result.status) {
+                        updateStatusDisplay(result.status);
+                    }
+                } else {
+                    log(`✗ ${result.error || 'Could not detect version'}`, 'log-err');
+                }
+            } catch (e) {
+                log(`✗ Detection failed: ${e.message}`, 'log-err');
             }
-            log('Could not auto-detect version. Check credentials.', 'log-err');
         }
 
         async function setPower(on) {
             await apiCall('/api/power', { on });
         }
 
-        async function setBrightness() {
-            const val = parseInt(document.getElementById('brightness').value);
-            await apiCall('/api/brightness', { value: val });
+        // ── Debounce helper ──
+        function debounce(fn, ms) {
+            let t;
+            return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
         }
 
-        async function setColorTemp() {
-            const kelvin = parseInt(document.getElementById('ct').value);
-            await apiCall('/api/color_temp', { kelvin });
+        // ── Brightness: auto-apply on change ──
+        const brightnessSlider = document.getElementById('brightness');
+        const bvalLabel = document.getElementById('bval');
+        brightnessSlider.addEventListener('input', () => {
+            bvalLabel.textContent = brightnessSlider.value;
+        });
+        brightnessSlider.addEventListener('input', debounce(() => {
+            apiCall('/api/brightness', { value: parseInt(brightnessSlider.value) });
+        }, 300));
+
+        // ── Color Temp: auto-apply on change ──
+        const ctSlider = document.getElementById('ct');
+        const ctvalLabel = document.getElementById('ctval');
+        ctSlider.addEventListener('input', () => {
+            ctvalLabel.textContent = ctSlider.value + 'K';
+        });
+        ctSlider.addEventListener('input', debounce(() => {
+            apiCall('/api/color_temp', { kelvin: parseInt(ctSlider.value) });
+        }, 300));
+
+        // ── Radial Color Wheel ──
+        let selectedHue = 0, selectedSat = 100;
+
+        function drawColorWheel() {
+            const canvas = document.getElementById('color-wheel');
+            const ctx = canvas.getContext('2d');
+            const cx = canvas.width / 2, cy = canvas.height / 2;
+            const radius = cx - 2;
+
+            // Draw hue/saturation wheel
+            for (let angle = 0; angle < 360; angle += 0.5) {
+                const startRad = (angle - 0.5) * Math.PI / 180;
+                const endRad = (angle + 1) * Math.PI / 180;
+                const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius);
+                grad.addColorStop(0, `hsl(${angle}, 0%, 100%)`);
+                grad.addColorStop(0.5, `hsl(${angle}, 50%, 50%)`);
+                grad.addColorStop(1, `hsl(${angle}, 100%, 50%)`);
+                ctx.beginPath();
+                ctx.moveTo(cx, cy);
+                ctx.arc(cx, cy, radius, startRad, endRad);
+                ctx.closePath();
+                ctx.fillStyle = grad;
+                ctx.fill();
+            }
         }
 
-        async function setColor() {
-            const hue = parseFloat(document.getElementById('hue').value);
-            const saturation = parseFloat(document.getElementById('sat').value);
-            const brightness = parseInt(document.getElementById('brightness').value);
-            await apiCall('/api/color', { hue, saturation, brightness });
+        function wheelXYToHS(x, y) {
+            const canvas = document.getElementById('color-wheel');
+            const cx = canvas.width / 2, cy = canvas.height / 2;
+            const radius = cx - 2;
+            const dx = x - cx, dy = y - cy;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            const sat = Math.min(100, Math.round(dist / radius * 100));
+            let hue = Math.round(Math.atan2(dy, dx) * 180 / Math.PI);
+            if (hue < 0) hue += 360;
+            return { hue, sat };
         }
 
-        function updateColorPreview() {
-            const h = parseInt(document.getElementById('hue').value) || 0;
-            const s = parseInt(document.getElementById('sat').value) || 100;
-            const preview = document.getElementById('color-preview');
-            preview.style.background = `hsl(${h}, ${s}%, ${50}%)`;
+        function hsToWheelXY(h, s) {
+            const canvas = document.getElementById('color-wheel');
+            const cx = canvas.width / 2, cy = canvas.height / 2;
+            const radius = cx - 2;
+            const rad = h * Math.PI / 180;
+            const dist = s / 100 * radius;
+            return { x: cx + dist * Math.cos(rad), y: cy + dist * Math.sin(rad) };
         }
+
+        function updateWheelCursor(h, s) {
+            const pos = hsToWheelXY(h, s);
+            const cursor = document.getElementById('color-cursor');
+            cursor.style.left = pos.x + 'px';
+            cursor.style.top = pos.y + 'px';
+            cursor.style.background = `hsl(${h}, ${s}%, 50%)`;
+            document.getElementById('color-swatch').style.background = `hsl(${h}, ${s}%, 50%)`;
+            document.getElementById('color-label').textContent = `H: ${h}°  S: ${s}%`;
+        }
+
+        const applyColorDebounced = debounce(() => {
+            const brightness = parseInt(brightnessSlider.value);
+            apiCall('/api/color', { hue: selectedHue, saturation: selectedSat, brightness });
+        }, 250);
+
+        function handleWheelInteraction(e) {
+            const canvas = document.getElementById('color-wheel');
+            const rect = canvas.getBoundingClientRect();
+            const scaleX = canvas.width / rect.width;
+            const scaleY = canvas.height / rect.height;
+            const x = (e.clientX - rect.left) * scaleX;
+            const y = (e.clientY - rect.top) * scaleY;
+            const { hue, sat } = wheelXYToHS(x, y);
+            selectedHue = hue;
+            selectedSat = sat;
+            updateWheelCursor(hue, sat);
+            applyColorDebounced();
+        }
+
+        // Mouse events
+        let wheelDragging = false;
+        document.getElementById('color-wheel').addEventListener('mousedown', (e) => {
+            wheelDragging = true;
+            handleWheelInteraction(e);
+        });
+        document.addEventListener('mousemove', (e) => {
+            if (wheelDragging) handleWheelInteraction(e);
+        });
+        document.addEventListener('mouseup', () => { wheelDragging = false; });
+
+        // Touch events
+        document.getElementById('color-wheel').addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            wheelDragging = true;
+            handleWheelInteraction(e.touches[0]);
+        }, { passive: false });
+        document.addEventListener('touchmove', (e) => {
+            if (wheelDragging) {
+                e.preventDefault();
+                handleWheelInteraction(e.touches[0]);
+            }
+        }, { passive: false });
+        document.addEventListener('touchend', () => { wheelDragging = false; });
+
+        // Draw on load
+        window.addEventListener('load', () => {
+            drawColorWheel();
+            updateWheelCursor(0, 100);
+        });
 
         let lastScanResults = [];
 

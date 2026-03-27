@@ -31,7 +31,10 @@ from custom_components.ha_ledvance_lights.const import (  # noqa: E402
     tuya_ct_to_kelvin,
 )
 from custom_components.ha_ledvance_lights.tuya.device import TuyaDevice  # noqa: E402
-from custom_components.ha_ledvance_lights.tuya.scanner import scan_devices  # noqa: E402
+from custom_components.ha_ledvance_lights.tuya.scanner import (  # noqa: E402
+    detect_version,
+    scan_devices,
+)
 
 routes = web.RouteTableDef()
 
@@ -133,6 +136,44 @@ async def api_color(request: web.Request) -> web.Response:
     values = {str(DP_MODE): "colour", str(DP_COLOR_HSV): hex_val}
     result = await request.app.loop.run_in_executor(None, dev.set_multiple_values, values)
     return web.json_response(result)
+
+
+@routes.post("/api/detect_version")
+async def api_detect_version(request: web.Request) -> web.Response:
+    """Detect protocol version, then try to get status with each version."""
+    data = await request.json()
+    ip = data["ip_address"]
+    dev_id = data["device_id"]
+    local_key = data["local_key"]
+
+    # Step 1: Quick probe to guess version from response structure
+    hint = await request.app.loop.run_in_executor(None, detect_version, ip)
+
+    # Step 2: Order versions — hint first, then others
+    all_versions = ["3.3", "3.4", "3.5"]
+    if hint and hint in all_versions:
+        versions = [hint] + [v for v in all_versions if v != hint]
+    else:
+        versions = all_versions
+
+    # Step 3: Try each version until status succeeds
+    for ver in versions:
+        dev = TuyaDevice(dev_id=dev_id, address=ip, local_key=local_key, version=ver)
+        dev.set_socketTimeout(5)
+        dev.set_socketRetryLimit(1)
+        result = await request.app.loop.run_in_executor(None, dev.status)
+        if result and "dps" in result:
+            return web.json_response({
+                "version": ver,
+                "hint": hint,
+                "status": result,
+            })
+
+    return web.json_response({
+        "version": None,
+        "hint": hint,
+        "error": "Could not connect with any version. Check device ID and local key.",
+    })
 
 
 @routes.post("/api/scan")

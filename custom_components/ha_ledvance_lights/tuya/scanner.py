@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import hashlib
 import ipaddress
 import json
@@ -12,7 +14,7 @@ import select
 import socket
 import struct
 import subprocess
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 
 from .crypto import aes_ecb_decrypt, aes_gcm_decrypt
 from .message import (
@@ -43,8 +45,9 @@ UDP_KEY = hashlib.md5(b"yGAdlopoPVldABfn").digest()
 GCM_TAG_SIZE = 16
 
 # TCP probe settings
-TCP_PROBE_TIMEOUT = 1.0
-TCP_PROBE_MAX_WORKERS = 50
+TCP_CONNECT_TIMEOUT = 0.5  # 500ms — more than enough for LAN
+TCP_PROBE_TIMEOUT = 1.0  # read timeout after sending probe
+TCP_MAX_CONCURRENT = 128  # asyncio semaphore limit
 
 
 def _create_udp_socket(port: int) -> socket.socket | None:
@@ -52,8 +55,6 @@ def _create_udp_socket(port: int) -> socket.socket | None:
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        import contextlib
-
         with contextlib.suppress(AttributeError, OSError):
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -168,53 +169,64 @@ def _extract_device_info(broadcast: dict) -> dict | None:
 # ─────────────────────────────────────────────
 
 
-def _probe_ip(ip: str) -> dict | None:
-    """Probe a single IP for a real Tuya device on TCP port 6668.
+async def _async_probe_ip(
+    ip: str,
+    semaphore: asyncio.Semaphore,
+    probe_packet: bytes,
+) -> dict | None:
+    """Probe a single IP for a Tuya device using asyncio.
 
-    Connects, sends a DP_QUERY probe, and checks if the response is valid Tuya
-    protocol. Extracts version and device ID when possible.
+    Fast path: connect with short timeout → send probe → check response.
     """
-    sock = None
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(TCP_PROBE_TIMEOUT)
-        result = sock.connect_ex((ip, TCP_PORT))
-
-        if result != 0:
+    async with semaphore:
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(ip, TCP_PORT),
+                timeout=TCP_CONNECT_TIMEOUT,
+            )
+        except (TimeoutError, OSError, ConnectionRefusedError):
             return None
 
-        # Try to read auto-response (some devices send data on connect)
         try:
-            sock.settimeout(1.5)
-            data = sock.recv(1024)
+            # Send probe immediately (skip waiting for auto-response)
+            writer.write(probe_packet)
+            await writer.drain()
+
+            # Read response
+            try:
+                data = await asyncio.wait_for(
+                    reader.read(1024),
+                    timeout=TCP_PROBE_TIMEOUT,
+                )
+            except TimeoutError:
+                return None
+
             if data and _is_tuya_response(data):
-                _LOGGER.debug("Tuya device confirmed at %s (auto-response)", ip)
+                _LOGGER.debug("Tuya device confirmed at %s", ip)
                 return _build_tcp_device(ip, data)
-        except (TimeoutError, OSError):
+        except OSError:
             pass
-
-        # Send a v3.3-style DP_QUERY probe to elicit a response
-        try:
-            probe = _build_probe_packet()
-            sock.sendall(probe)
-            sock.settimeout(2.0)
-            data = sock.recv(1024)
-            if data and _is_tuya_response(data):
-                _LOGGER.debug("Tuya device confirmed at %s (probe response)", ip)
-                return _build_tcp_device(ip, data)
-        except (TimeoutError, OSError):
-            pass
-
-        _LOGGER.debug("Port 6668 open at %s but not a Tuya device", ip)
-    except OSError:
-        pass
-    finally:
-        if sock:
-            import contextlib
-
+        finally:
             with contextlib.suppress(OSError):
-                sock.close()
+                writer.close()
+                await writer.wait_closed()
+
     return None
+
+
+def _probe_ip(ip: str) -> dict | None:
+    """Probe a single IP for a Tuya device (sync wrapper for legacy callers)."""
+    probe = _build_probe_packet()
+    sem = asyncio.Semaphore(1)
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(_async_probe_ip(ip, sem, probe))
+    # If already in an event loop, run in a new thread
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(
+            asyncio.run, _async_probe_ip(ip, sem, probe)
+        ).result()
 
 
 def _is_tuya_response(data: bytes) -> bool:
@@ -228,15 +240,19 @@ def _detect_version_from_response(data: bytes) -> str:
     """Detect protocol version from a raw Tuya TCP response.
 
     Uses structural clues since the payload itself is encrypted:
-    - 0x6699 prefix → v3.5
-    - 0x55AA with payload_len indicating HMAC footer (36-byte) → v3.4
-    - 0x55AA with payload_len indicating CRC footer (8-byte) → v3.3
-    - Version string "3.x" at payload offset → explicit version
+    - 0x6699 prefix → v3.5 (definitive)
+    - 0x55AA with explicit "3.x" version string → that version (definitive)
+    - 0x55AA with CRC footer → v3.3 or v3.4 (both use CRC for error responses
+      before session key negotiation, so we return "3.3" as the common base)
+
+    Note: v3.3 and v3.4 devices both respond with CRC-based 55AA messages to
+    unauthenticated queries. True differentiation requires attempting a session
+    key handshake (which _test_connection does by trying each version).
     """
     if len(data) < 16:
         return ""
 
-    # v3.5 uses a completely different prefix
+    # v3.5 uses a completely different prefix — definitive
     if data[:4] == PREFIX_6699_BIN:
         return "3.5"
 
@@ -249,22 +265,15 @@ def _detect_version_from_response(data: bytes) -> str:
         if ver_bytes in (b"3.3", b"3.4", b"3.5"):
             return ver_bytes.decode()
 
-    # Infer from footer size: parse the header to get payload_len,
-    # then check if total message matches CRC footer (v3.3) or HMAC (v3.4)
+    # 55AA prefix with no explicit version — could be v3.3 or v3.4
+    # Verify it's a valid Tuya message
     try:
         _, _, _, payload_len, header_size = parse_header(data)
         total_len = header_size + payload_len
-        actual_len = len(data)
         suffix_55aa = struct.pack(">I", 0x0000AA55)
 
-        if actual_len == total_len and data[-4:] == suffix_55aa:
-            # CRC footer (v3.3): 4-byte CRC + 4-byte suffix = 8
-            encrypted_len = payload_len - 8
-            if encrypted_len > 0 and encrypted_len % 16 == 0:
-                return "3.3"
-            # HMAC footer (v3.4): 32-byte HMAC + 4-byte suffix = 36
-            if payload_len - 36 > 0:
-                return "3.4"
+        if len(data) == total_len and data[-4:] == suffix_55aa:
+            return "3.3"  # Best guess — _test_connection will try all versions
     except (DecodeError, struct.error):
         pass
 
@@ -398,32 +407,43 @@ def _parse_network(network: str) -> list[str]:
     return []
 
 
+async def _async_scan_network(network: str) -> list[dict]:
+    """Scan a network for Tuya devices using concurrent asyncio probes."""
+    ips = _parse_network(network)
+    if not ips:
+        _LOGGER.warning("Invalid network specification: %s", network)
+        return []
+
+    _LOGGER.debug("TCP probing %d IPs for Tuya devices (async)", len(ips))
+    semaphore = asyncio.Semaphore(TCP_MAX_CONCURRENT)
+    probe = _build_probe_packet()
+
+    tasks = [_async_probe_ip(ip, semaphore, probe) for ip in ips]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    return [r for r in results if isinstance(r, dict)]
+
+
 def scan_network(network: str, timeout: float = 30.0) -> list[dict]:
     """Scan a specific network/IP range for Tuya devices via TCP probe.
 
     Works across VLANs since it uses direct TCP connections, not UDP broadcasts.
     This is a blocking call — run it in an executor for async contexts.
     """
-    ips = _parse_network(network)
-    if not ips:
-        _LOGGER.warning("Invalid network specification: %s", network)
-        return []
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
 
-    _LOGGER.debug("TCP probing %d IPs for Tuya devices", len(ips))
-    devices: list[dict] = []
-
-    max_workers = min(TCP_PROBE_MAX_WORKERS, len(ips))
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(_probe_ip, ip): ip for ip in ips}
-        for future in as_completed(futures, timeout=timeout):
-            try:
-                result = future.result()
-                if result:
-                    devices.append(result)
-            except Exception:
-                pass
-
-    return devices
+    if loop and loop.is_running():
+        # Already in an async context — run in a new thread with its own loop
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(asyncio.run, _async_scan_network(network))
+            return future.result(timeout=timeout)
+    else:
+        return asyncio.run(
+            asyncio.wait_for(_async_scan_network(network), timeout=timeout)
+        )
 
 
 # ─────────────────────────────────────────────
@@ -611,7 +631,107 @@ def _ip_in_subnet(ip: str, network_ip: str, netmask: str) -> bool:
 
 
 # ─────────────────────────────────────────────
-#  Combined scan: UDP broadcast + optional TCP probe
+#  Quick version detection via TCP probe
+# ─────────────────────────────────────────────
+
+
+def detect_version(ip: str, timeout: float = 2.0) -> str:
+    """Detect the Tuya protocol version of a device at the given IP.
+
+    Connects to port 6668, sends a probe, and infers the version from
+    the response structure. Returns "" if detection fails.
+    """
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        sock.connect((ip, TCP_PORT))
+
+        probe = _build_probe_packet()
+        sock.sendall(probe)
+        data = sock.recv(1024)
+        sock.close()
+
+        if data and _is_tuya_response(data):
+            return _detect_version_from_response(data)
+    except OSError:
+        pass
+    return ""
+
+
+# ─────────────────────────────────────────────
+#  UDP-only scan (lightweight, for HA config flow)
+# ─────────────────────────────────────────────
+
+
+def scan_devices_udp(timeout: float = 8.0) -> list[dict]:
+    """Scan for Tuya devices using only UDP broadcasts.
+
+    This is the lightweight scanner for Home Assistant config flow.
+    It only discovers devices on the same network (same broadcast domain).
+    Returns a list of dicts with keys: id, ip, version, product_key.
+    """
+    devices: dict[str, dict] = {}
+
+    sockets: list[tuple[socket.socket, int]] = []
+    for port in (UDP_PORT_31, UDP_PORT_33, UDP_PORT_APP):
+        sock = _create_udp_socket(port)
+        if sock:
+            sockets.append((sock, port))
+
+    if not sockets:
+        _LOGGER.warning("Could not bind to any UDP discovery port")
+        return []
+
+    for sock, port in sockets:
+        if port == UDP_PORT_APP:
+            _send_discovery_broadcast(sock)
+
+    try:
+        elapsed = 0.0
+        poll_interval = 0.5
+
+        while elapsed < timeout:
+            readable, _, _ = select.select(
+                [s for s, _ in sockets],
+                [],
+                [],
+                min(poll_interval, timeout - elapsed),
+            )
+
+            for sock in readable:
+                port = next(p for s, p in sockets if s is sock)
+                try:
+                    data, _addr = sock.recvfrom(4096)
+                    broadcast = _decode_broadcast(data, port)
+                    if broadcast:
+                        info = _extract_device_info(broadcast)
+                        if info and info["id"] not in devices:
+                            _LOGGER.debug(
+                                "UDP: Discovered %s at %s (v%s)",
+                                info["id"],
+                                info["ip"],
+                                info["version"],
+                            )
+                            devices[info["id"]] = info
+                except OSError:
+                    pass
+
+            elapsed += poll_interval
+
+            if elapsed % 3.0 < poll_interval:
+                for sock, port in sockets:
+                    if port == UDP_PORT_APP:
+                        _send_discovery_broadcast(sock)
+    finally:
+        for sock, _ in sockets:
+            with contextlib.suppress(OSError):
+                sock.close()
+
+    return list(devices.values())
+
+
+# ─────────────────────────────────────────────
+#  Full scan: UDP broadcast + optional TCP probe (for web UI)
 # ─────────────────────────────────────────────
 
 
@@ -681,8 +801,6 @@ def scan_devices(
                         if port == UDP_PORT_APP:
                             _send_discovery_broadcast(sock)
         finally:
-            import contextlib
-
             for sock, _ in sockets:
                 with contextlib.suppress(OSError):
                     sock.close()
@@ -723,8 +841,6 @@ def _ping_ips(ips: list[str]) -> None:
     timeout_val = "500" if system == "Darwin" else "1"
 
     def _ping_one(ip: str) -> None:
-        import contextlib
-
         with contextlib.suppress(subprocess.TimeoutExpired, FileNotFoundError, OSError):
             subprocess.run(
                 ["ping", count_flag, "1", timeout_flag, timeout_val, ip],
