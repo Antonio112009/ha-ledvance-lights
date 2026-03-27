@@ -153,6 +153,11 @@ class LedvanceDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         into a single device command.  The optimistic update is applied
         immediately so the UI stays responsive, but the actual TCP command is
         delayed by ``_DEBOUNCE_SECONDS`` to coalesce rapid changes.
+
+        IMPORTANT: In colour mode, brightness is encoded in the V component of
+        the HSV hex string (DP24).  DP22 (DP_BRIGHTNESS) must NOT be sent in
+        colour mode — Ledvance devices interpret it as a white-mode command and
+        switch away from colour mode.
         """
         dps: dict[str, Any] = {str(DP_POWER): True}
 
@@ -161,11 +166,16 @@ class LedvanceDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         elif hsv_hex is not None:
             dps[str(DP_MODE)] = "colour"
             dps[str(DP_COLOR_HSV)] = hsv_hex
+            # Do NOT send DP_BRIGHTNESS — it triggers white mode on Ledvance.
+            # Brightness in colour mode is the V component of the HSV hex.
         elif color_temp is not None:
             dps[str(DP_MODE)] = "white"
             dps[str(DP_COLOR_TEMP)] = color_temp
-
-        if brightness is not None:
-            dps[str(DP_BRIGHTNESS)] = brightness
+            if brightness is not None:
+                dps[str(DP_BRIGHTNESS)] = brightness
+        else:
+            # No mode change — brightness-only in white mode.
+            if brightness is not None:
+                dps[str(DP_BRIGHTNESS)] = brightness
 
         self._schedule_debounced_send(dps)

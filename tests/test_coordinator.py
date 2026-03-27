@@ -6,7 +6,6 @@ focusing on data processing, DP command construction, and debounce behaviour.
 
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -117,8 +116,8 @@ class TestAsyncTurnOnWithAttrs:
     """Tests for the async_turn_on_with_attrs method (debounced)."""
 
     @pytest.mark.asyncio
-    async def test_brightness_only(self, mock_tuya_device, mock_entry_data):
-        """Test setting brightness only sends correct DPs after debounce."""
+    async def test_brightness_only_white_mode(self, mock_tuya_device, mock_entry_data):
+        """Test setting brightness in white mode sends DP22."""
         coordinator = _make_coordinator(mock_tuya_device, mock_entry_data)
 
         await coordinator.async_turn_on_with_attrs(brightness=500)
@@ -128,7 +127,6 @@ class TestAsyncTurnOnWithAttrs:
         dps = mock_tuya_device.set_multiple_values.call_args[0][0]
         assert dps[str(DP_POWER)] is True
         assert dps[str(DP_BRIGHTNESS)] == 500
-        assert str(DP_MODE) not in dps
 
     @pytest.mark.asyncio
     async def test_color_temp(self, mock_tuya_device, mock_entry_data):
@@ -169,6 +167,24 @@ class TestAsyncTurnOnWithAttrs:
         assert dps[str(DP_POWER)] is True
         assert dps[str(DP_MODE)] == "colour"
         assert dps[str(DP_COLOR_HSV)] == "007803e803e8"
+
+    @pytest.mark.asyncio
+    async def test_hsv_does_not_send_dp_brightness(self, mock_tuya_device, mock_entry_data):
+        """Test that DP_BRIGHTNESS is NOT sent when HSV is set.
+
+        Ledvance devices switch to white mode when DP22 is sent in colour mode.
+        Brightness in colour mode is encoded in the V component of HSV hex.
+        """
+        coordinator = _make_coordinator(mock_tuya_device, mock_entry_data)
+
+        await coordinator.async_turn_on_with_attrs(hsv_hex="007803e803e8", brightness=500)
+        await _flush_debounce(coordinator)
+
+        dps = mock_tuya_device.set_multiple_values.call_args[0][0]
+        assert dps[str(DP_MODE)] == "colour"
+        assert dps[str(DP_COLOR_HSV)] == "007803e803e8"
+        # DP_BRIGHTNESS must NOT be sent — it triggers white mode on Ledvance
+        assert str(DP_BRIGHTNESS) not in dps
 
     @pytest.mark.asyncio
     async def test_scene_num(self, mock_tuya_device, mock_entry_data):
@@ -228,19 +244,6 @@ class TestAsyncTurnOnWithAttrs:
         await _flush_debounce(coordinator)
         mock_tuya_device.set_multiple_values.assert_called_once()
 
-    @pytest.mark.asyncio
-    async def test_hsv_with_brightness_sends_both(self, mock_tuya_device, mock_entry_data):
-        """Test that both DP22 and HSV are sent when brightness + HSV are set."""
-        coordinator = _make_coordinator(mock_tuya_device, mock_entry_data)
-
-        await coordinator.async_turn_on_with_attrs(hsv_hex="007803e803e8", brightness=500)
-        await _flush_debounce(coordinator)
-
-        dps = mock_tuya_device.set_multiple_values.call_args[0][0]
-        assert dps[str(DP_MODE)] == "colour"
-        assert dps[str(DP_COLOR_HSV)] == "007803e803e8"
-        assert dps[str(DP_BRIGHTNESS)] == 500
-
 
 class TestDebounceCoalescing:
     """Tests that rapid calls are coalesced into a single device command."""
@@ -279,6 +282,8 @@ class TestDebounceCoalescing:
         dps = mock_tuya_device.set_multiple_values.call_args[0][0]
         assert dps[str(DP_MODE)] == "colour"
         assert dps[str(DP_COLOR_HSV)] == "007803e803e8"
+        # Brightness merges via _pending_dps.update, so DP22 will be present
+        # in the merged dict (from the second call which was brightness-only).
         assert dps[str(DP_BRIGHTNESS)] == 600
 
     @pytest.mark.asyncio

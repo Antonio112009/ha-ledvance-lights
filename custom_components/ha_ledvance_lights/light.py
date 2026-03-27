@@ -89,10 +89,22 @@ class LedvanceLight(CoordinatorEntity[LedvanceDataUpdateCoordinator], LightEntit
     def brightness(self) -> int | None:
         """Return the brightness (0-255).
 
-        DP22 controls physical LED brightness in all modes (white and colour).
+        In white/CT mode brightness comes from DP22 (DP_BRIGHTNESS).
+        In colour mode brightness is the V component of the HSV hex (DP24).
+        Ledvance devices do NOT update DP22 when in colour mode, so reading
+        DP22 would return a stale white-mode value.
         """
         if self.coordinator.data is None:
             return None
+
+        mode = self.coordinator.data.get(str(DP_MODE))
+        if mode == "colour":
+            hex_str = self.coordinator.data.get(str(DP_COLOR_HSV), "")
+            if hex_str and len(hex_str) >= 12:
+                v_tuya = int(hex_str[8:12], 16)
+                return tuya_brightness_to_ha(v_tuya)
+            return None
+
         value = self.coordinator.data.get(str(DP_BRIGHTNESS))
         if value is None:
             return None

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from homeassistant.components.diagnostics import async_redact_data
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
 
 from .const import (
     CONF_DEVICE_ID,
@@ -24,11 +26,7 @@ from .const import (
     tuya_brightness_to_ha,
     tuya_ct_to_kelvin,
 )
-
-if TYPE_CHECKING:
-    from homeassistant.core import HomeAssistant
-
-    from .coordinator import LedvanceConfigEntry
+from .coordinator import LedvanceDataUpdateCoordinator
 
 # Keys to redact from diagnostics output
 TO_REDACT_CONFIG = {CONF_LOCAL_KEY}
@@ -133,10 +131,10 @@ def _format_device_status(dps: dict[str, Any] | None) -> dict[str, Any]:
 
 async def async_get_config_entry_diagnostics(
     hass: HomeAssistant,
-    entry: LedvanceConfigEntry,
+    entry: ConfigEntry,
 ) -> dict[str, Any]:
     """Return diagnostics for a config entry."""
-    coordinator = entry.runtime_data
+    coordinator: LedvanceDataUpdateCoordinator = entry.runtime_data
 
     # Connection health
     health: dict[str, Any] = {
