@@ -2,7 +2,7 @@
 
 from homeassistant.const import Platform
 
-VERSION = "1.3.5"
+VERSION = "1.3.6"
 
 DOMAIN = "ha_ledvance_lights"
 

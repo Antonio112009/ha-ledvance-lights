@@ -213,9 +213,7 @@ class TestAsyncTurnOnWithAttrs:
         """Test that both DP22 and HSV are sent when brightness + HSV are set."""
         coordinator = _make_coordinator(mock_tuya_device, mock_entry_data)
 
-        await coordinator.async_turn_on_with_attrs(
-            hsv_hex="007803e803e8", brightness=500
-        )
+        await coordinator.async_turn_on_with_attrs(hsv_hex="007803e803e8", brightness=500)
 
         dps = mock_tuya_device.set_multiple_values.call_args[0][0]
         assert dps[str(DP_MODE)] == "colour"

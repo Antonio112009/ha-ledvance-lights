@@ -174,9 +174,7 @@ class LedvanceLight(CoordinatorEntity[LedvanceDataUpdateCoordinator], LightEntit
             if brightness_tuya is not None:
                 v = brightness_tuya
             else:
-                v = (self.coordinator.data or {}).get(
-                    str(DP_BRIGHTNESS), TUYA_BRIGHTNESS_MAX
-                )
+                v = (self.coordinator.data or {}).get(str(DP_BRIGHTNESS), TUYA_BRIGHTNESS_MAX)
             hsv_hex = hs_to_tuya_hex(h, s, v)
         elif brightness_tuya is not None and self.color_mode == ColorMode.HS:
             # Brightness-only change while in colour mode: update the HSV hex
