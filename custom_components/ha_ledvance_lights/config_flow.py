@@ -106,6 +106,78 @@ class LedvanceWifiConfigFlow(ConfigFlow, domain=DOMAIN):
         self._discovered_devices: list[dict] = []
         self._selected_device: dict | None = None
 
+    def _get_configured_device_ids(self) -> set[str]:
+        """Return device IDs and IPs that are already configured."""
+        configured: set[str] = set()
+        for entry in self._async_current_entries(include_ignore=True):
+            dev_id = entry.data.get(CONF_DEVICE_ID, "")
+            if dev_id:
+                configured.add(dev_id)
+            ip = entry.data.get(CONF_IP_ADDRESS, "")
+            if ip:
+                configured.add(ip)
+        return configured
+
+    def _filter_unconfigured(self, devices: list[dict]) -> list[dict]:
+        """Remove already-configured devices from a scan result list."""
+        configured = self._get_configured_device_ids()
+        return [
+            d
+            for d in devices
+            if d.get("id", "") not in configured and d.get("ip", "") not in configured
+        ]
+
+    def _fire_discovery_for_remaining(self) -> None:
+        """Create discovery flows for remaining unconfigured devices.
+
+        After the user configures one device from a scan, this fires
+        discovery flows for the other devices so they appear as
+        "Discovered" in the HA integrations page — no re-scan needed.
+        """
+        if not self._discovered_devices:
+            return
+
+        remaining = self._filter_unconfigured(self._discovered_devices)
+        for dev in remaining:
+            dev_id = dev.get("id", "")
+            if not dev_id:
+                continue
+            self.hass.async_create_task(
+                self.hass.config_entries.flow.async_init(
+                    DOMAIN,
+                    context={"source": "discovery"},
+                    data={
+                        CONF_IP_ADDRESS: dev["ip"],
+                        CONF_DEVICE_ID: dev_id,
+                        "version": dev.get("version", "unknown"),
+                    },
+                )
+            )
+
+    async def async_step_discovery(self, discovery_info: dict[str, Any]) -> ConfigFlowResult:
+        """Handle a device discovered from a previous scan.
+
+        Shows the credentials form directly — no need to re-scan.
+        """
+        dev_id = discovery_info[CONF_DEVICE_ID]
+        ip = discovery_info[CONF_IP_ADDRESS]
+
+        await self.async_set_unique_id(dev_id)
+        self._abort_if_unique_id_configured()
+
+        self._selected_device = {
+            "id": dev_id,
+            "ip": ip,
+            "version": discovery_info.get("version", "unknown"),
+        }
+
+        # Set a nice title for the discovery notification
+        self.context["title_placeholders"] = {
+            "name": f"Ledvance Light ({ip})",
+        }
+
+        return await self.async_step_credentials()
+
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Initial step — choose scan or manual entry.
 
@@ -139,6 +211,7 @@ class LedvanceWifiConfigFlow(ConfigFlow, domain=DOMAIN):
 
         Uses UDP broadcast for same-subnet discovery, plus TCP probing if
         a network (CIDR/range) was specified for cross-VLAN scanning.
+        Already-configured devices are filtered out automatically.
         """
         if user_input is not None:
             # User selected a device from the scan results
@@ -160,19 +233,24 @@ class LedvanceWifiConfigFlow(ConfigFlow, domain=DOMAIN):
         try:
             if network:
                 # Full scan: UDP + TCP for the specified network
-                self._discovered_devices = await self.hass.async_add_executor_job(
-                    scan_devices, 10.0, network
-                )
+                all_devices = await self.hass.async_add_executor_job(scan_devices, 10.0, network)
             else:
                 # UDP-only scan (same subnet)
-                self._discovered_devices = await self.hass.async_add_executor_job(
-                    scan_devices_udp, 8.0
-                )
+                all_devices = await self.hass.async_add_executor_job(scan_devices_udp, 8.0)
         except Exception:
             _LOGGER.exception("Error scanning for devices")
-            self._discovered_devices = []
+            all_devices = []
+
+        # Filter out devices that are already configured
+        self._discovered_devices = self._filter_unconfigured(all_devices)
 
         if not self._discovered_devices:
+            if all_devices:
+                # Devices were found but all are already configured
+                return await self.async_step_manual(
+                    _show_scan_failed=True,
+                    _all_configured=True,
+                )
             return await self.async_step_manual(_show_scan_failed=True)
 
         # Build device selection list
@@ -235,6 +313,9 @@ class LedvanceWifiConfigFlow(ConfigFlow, domain=DOMAIN):
                     device_id = connection_data[CONF_DEVICE_ID]
                     device_name = f"Ledvance Light {device_id[-4:]}"
 
+                    # Fire discovery flows for remaining unconfigured devices
+                    self._fire_discovery_for_remaining()
+
                     return self.async_create_entry(
                         title=device_name,
                         data={
@@ -248,18 +329,24 @@ class LedvanceWifiConfigFlow(ConfigFlow, domain=DOMAIN):
             step_id="credentials",
             data_schema=schema,
             errors=errors,
-            description_placeholders={"ip": ip, "device_id": dev_id or "unknown"},
+            description_placeholders={
+                "ip": ip,
+                "device_id": dev_id or "unknown",
+            },
         )
 
     async def async_step_manual(
         self,
         user_input: dict[str, Any] | None = None,
         _show_scan_failed: bool = False,
+        _all_configured: bool = False,
     ) -> ConfigFlowResult:
         """Manual device entry."""
         errors: dict[str, str] = {}
 
-        if _show_scan_failed:
+        if _all_configured:
+            errors["base"] = "all_devices_configured"
+        elif _show_scan_failed:
             errors["base"] = "no_devices_found"
 
         if user_input is not None:

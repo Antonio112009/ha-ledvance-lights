@@ -50,7 +50,8 @@
       "device_not_found": "No device found at this IP address. Check the IP and make sure the device is online.",
       "invalid_key": "Invalid Device ID or Local Key. Please check your credentials.",
       "cannot_connect": "Cannot connect to the device. Please try again.",
-      "no_devices_found": "No devices found on your network. Enter your device details manually below."
+      "no_devices_found": "No devices found on your network. Enter your device details manually below.",
+      "all_devices_configured": "All discovered devices are already configured. Enter new device details manually below."
     },
     "abort": {
       "already_configured": "This device is already configured."

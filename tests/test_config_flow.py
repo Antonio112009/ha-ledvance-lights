@@ -228,7 +228,7 @@ class TestTestConnection:
 class TestConfigFlowSteps:
     """Tests for the config flow step methods (mocked HA framework)."""
 
-    def _make_flow(self):
+    def _make_flow(self, configured_entries=None):
         """Create a LedvanceWifiConfigFlow with mocked HA internals."""
         from custom_components.ha_ledvance_lights.config_flow import (
             LedvanceWifiConfigFlow,
@@ -236,10 +236,12 @@ class TestConfigFlowSteps:
 
         flow = LedvanceWifiConfigFlow()
         flow.hass = MagicMock()
+        flow.context = {}
         flow.async_show_form = MagicMock(return_value={"type": "form"})
         flow.async_create_entry = MagicMock(return_value={"type": "create_entry"})
         flow.async_set_unique_id = AsyncMock(return_value=None)
         flow._abort_if_unique_id_configured = MagicMock()
+        flow._async_current_entries = MagicMock(return_value=configured_entries or [])
         return flow
 
     @pytest.mark.asyncio
@@ -398,3 +400,175 @@ class TestConfigFlowSteps:
         call_kwargs = flow.async_show_form.call_args
         assert call_kwargs.kwargs.get("step_id") == "scan"
         assert flow._discovered_devices == devices
+
+    @pytest.mark.asyncio
+    async def test_scan_filters_already_configured_by_id(self):
+        """Test that already-configured devices are filtered from scan results."""
+        configured_entry = MagicMock()
+        configured_entry.data = {
+            "device_id": "device123456",
+            "ip_address": "192.168.1.50",
+        }
+
+        flow = self._make_flow(configured_entries=[configured_entry])
+        flow._scan_network = None
+
+        devices = [
+            {"id": "device123456", "ip": "192.168.1.50", "version": "3.4"},
+            {"id": "device789012", "ip": "192.168.1.51", "version": "3.3"},
+        ]
+        flow.hass.async_add_executor_job = AsyncMock(return_value=devices)
+
+        await flow.async_step_scan(user_input=None)
+
+        # Only the unconfigured device should remain
+        assert len(flow._discovered_devices) == 1
+        assert flow._discovered_devices[0]["id"] == "device789012"
+
+    @pytest.mark.asyncio
+    async def test_scan_all_configured_shows_message(self):
+        """Test that scan with all devices configured shows appropriate message."""
+        configured_entry = MagicMock()
+        configured_entry.data = {
+            "device_id": "device123456",
+            "ip_address": "192.168.1.50",
+        }
+
+        flow = self._make_flow(configured_entries=[configured_entry])
+        flow._scan_network = None
+        flow.async_step_manual = AsyncMock(return_value={"type": "form"})
+
+        devices = [
+            {"id": "device123456", "ip": "192.168.1.50", "version": "3.4"},
+        ]
+        flow.hass.async_add_executor_job = AsyncMock(return_value=devices)
+
+        await flow.async_step_scan(user_input=None)
+
+        flow.async_step_manual.assert_awaited_once_with(
+            _show_scan_failed=True, _all_configured=True
+        )
+
+    @pytest.mark.asyncio
+    async def test_scan_filters_by_ip(self):
+        """Test that devices with a configured IP are filtered even if ID differs."""
+        configured_entry = MagicMock()
+        configured_entry.data = {
+            "device_id": "some_other_id",
+            "ip_address": "192.168.1.50",
+        }
+
+        flow = self._make_flow(configured_entries=[configured_entry])
+        flow._scan_network = None
+
+        devices = [
+            {"id": "device_new", "ip": "192.168.1.50", "version": "3.4"},
+            {"id": "device_other", "ip": "192.168.1.51", "version": "3.3"},
+        ]
+        flow.hass.async_add_executor_job = AsyncMock(return_value=devices)
+
+        await flow.async_step_scan(user_input=None)
+
+        assert len(flow._discovered_devices) == 1
+        assert flow._discovered_devices[0]["id"] == "device_other"
+
+    @pytest.mark.asyncio
+    async def test_discovery_step_shows_credentials(self):
+        """Test that discovery step goes straight to credentials."""
+        flow = self._make_flow()
+
+        discovery_data = {
+            "ip_address": "192.168.1.50",
+            "device_id": "device123456",
+            "version": "3.4",
+        }
+
+        await flow.async_step_discovery(discovery_data)
+
+        assert flow._selected_device is not None
+        assert flow._selected_device["id"] == "device123456"
+        assert flow._selected_device["ip"] == "192.168.1.50"
+        # Should show the credentials form
+        flow.async_show_form.assert_called_once()
+        call_kwargs = flow.async_show_form.call_args
+        assert call_kwargs.kwargs.get("step_id") == "credentials"
+
+    @pytest.mark.asyncio
+    async def test_discovery_step_aborts_if_configured(self):
+        """Test that discovery step aborts for an already-configured device."""
+        flow = self._make_flow()
+        flow.async_set_unique_id = AsyncMock(return_value=None)
+        flow._abort_if_unique_id_configured = MagicMock(
+            side_effect=Exception("already_configured"),
+        )
+
+        discovery_data = {
+            "ip_address": "192.168.1.50",
+            "device_id": "device123456",
+            "version": "3.4",
+        }
+
+        with pytest.raises(Exception, match="already_configured"):
+            await flow.async_step_discovery(discovery_data)
+
+    def test_fire_discovery_for_remaining(self):
+        """Test that discovery flows are fired for remaining unconfigured devices."""
+        flow = self._make_flow()
+        flow.hass.async_create_task = MagicMock()
+
+        # Simulate two remaining unconfigured devices
+        flow._discovered_devices = [
+            {"id": "device_aaa", "ip": "192.168.1.50", "version": "3.4"},
+            {"id": "device_bbb", "ip": "192.168.1.51", "version": "3.3"},
+        ]
+
+        flow._fire_discovery_for_remaining()
+
+        # Should fire two discovery tasks
+        assert flow.hass.async_create_task.call_count == 2
+
+    def test_fire_discovery_skips_configured(self):
+        """Test that already-configured devices are not re-discovered."""
+        configured_entry = MagicMock()
+        configured_entry.data = {
+            "device_id": "device_aaa",
+            "ip_address": "192.168.1.50",
+        }
+
+        flow = self._make_flow(configured_entries=[configured_entry])
+        flow.hass.async_create_task = MagicMock()
+
+        flow._discovered_devices = [
+            {"id": "device_aaa", "ip": "192.168.1.50", "version": "3.4"},
+            {"id": "device_bbb", "ip": "192.168.1.51", "version": "3.3"},
+        ]
+
+        flow._fire_discovery_for_remaining()
+
+        # Only device_bbb should get a discovery flow
+        assert flow.hass.async_create_task.call_count == 1
+
+    def test_fire_discovery_empty_list(self):
+        """Test that no discovery flows are fired when no devices remain."""
+        flow = self._make_flow()
+        flow.hass.async_create_task = MagicMock()
+        flow._discovered_devices = []
+
+        flow._fire_discovery_for_remaining()
+
+        flow.hass.async_create_task.assert_not_called()
+
+    def test_fire_discovery_skips_devices_without_id(self):
+        """Test that TCP-probed devices without an ID are skipped."""
+        flow = self._make_flow()
+        flow.hass.async_create_task = MagicMock()
+
+        flow._discovered_devices = [
+            {"id": "", "ip": "192.168.1.50", "version": "3.4", "discovered_via": "tcp_probe"},
+            {"id": "device_bbb", "ip": "192.168.1.51", "version": "3.3"},
+        ]
+
+        flow._fire_discovery_for_remaining()
+
+        # Only device_bbb should get a discovery flow (empty ID is skipped)
+        assert flow.hass.async_create_task.call_count == 1
