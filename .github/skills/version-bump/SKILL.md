@@ -8,6 +8,15 @@ argument-hint: 'Specify bump type: major, minor, or patch'
 
 Bump the semantic version across all version files, then stage and commit.
 
+## CRITICAL — Always Bump Before Commit+Push
+
+Whenever the user asks to "commit and push", "commit", or triggers `/release`, you MUST:
+
+1. **Check for staged/unstaged changes** beyond version files.
+2. **Auto-detect the bump type** from the commit message the user provides (or that you generate).
+3. **Bump the version FIRST**, then include the version files in the same commit.
+4. Never commit code changes without bumping the version. If you forget, bump immediately in a follow-up commit before pushing.
+
 ## When to Use
 
 - Before a release commit

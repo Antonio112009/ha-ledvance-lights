@@ -1,10 +1,10 @@
-"""Constants for the Ledvance Lights integration."""
+"""Constants for the Ledvance Smart+ WiFi integration."""
 
 from homeassistant.const import Platform
 
-VERSION = "1.2.0"
+VERSION = "1.0.0"
 
-DOMAIN = "ha_ledvance_lights"
+DOMAIN = "ledvance_wifi"
 
 PLATFORMS: list[Platform] = [Platform.LIGHT]
 
@@ -23,7 +23,7 @@ ERR_KEY_OR_VER = "914"
 # Polling interval (seconds)
 DEFAULT_POLLING_INTERVAL = 30
 
-# Tuya DP mappings for Ledvance Lights (Type B)
+# Tuya DP mappings for Ledvance Smart+ WiFi (Type B)
 DP_POWER = 20
 DP_MODE = 21
 DP_BRIGHTNESS = 22

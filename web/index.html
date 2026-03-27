@@ -509,18 +509,21 @@
 
             container.innerHTML = devices.map(d => {
                 const isTcp = d.discovered_via === 'tcp_probe';
-                const isUdp = !isTcp && d.id;
-                let badge = '';
-                if (isUdp) badge = '<span class="badge badge-udp">UDP</span>';
-                else if (isTcp) badge = '<span class="badge badge-tcp">TCP</span>';
-                badge += '<span class="badge badge-tuya">Tuya</span>';
+                const isUdp = !isTcp;
+                let badges = '';
+                if (isUdp) badges += '<span class="badge badge-udp">UDP</span>';
+                else badges += '<span class="badge badge-tcp">TCP</span>';
+                badges += '<span class="badge badge-tuya">Tuya</span>';
 
-                const ver = d.version && d.version !== 'unknown' ? `v${d.version}` : '';
-                const idText = d.id || 'ID unknown';
+                const ver = d.version && d.version !== 'unknown' ? d.version : '';
+                if (ver) badges += `<span class="badge" style="background:#b57edc;color:#111">v${ver}</span>`;
 
-                return `<div class="scan-result" onclick="useDevice('${d.ip}', '${d.id || ''}', '${d.version || '3.3'}')">
-                    <span class="ip">${d.ip}</span>${badge}
-                    <span class="id">${idText} ${ver}</span>
+                const idText = d.id ? d.id : '<em style="color:var(--muted)">needs credentials</em>';
+                const productKey = d.product_key ? ` · ${d.product_key}` : '';
+
+                return `<div class="scan-result" onclick="useDevice('${d.ip}', '${d.id || ''}', '${ver || '3.3'}')">
+                    <div><span class="ip">${d.ip}</span>${badges}</div>
+                    <div class="id">${idText}${productKey}</div>
                 </div>`;
             }).join('');
         }

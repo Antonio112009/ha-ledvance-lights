@@ -168,9 +168,8 @@ def _extract_device_info(broadcast: dict) -> dict | None:
 def _probe_ip(ip: str) -> dict | None:
     """Probe a single IP for a real Tuya device on TCP port 6668.
 
-    Connects, sends a simple DP_QUERY-style probe, and checks if the response
-    starts with a valid Tuya prefix (0x000055AA or 0x00006699).
-    Only returns a result if the device actually speaks Tuya protocol.
+    Connects, sends a DP_QUERY probe, and checks if the response is valid Tuya
+    protocol. Extracts version and device ID when possible.
     """
     sock = None
     try:
@@ -181,17 +180,13 @@ def _probe_ip(ip: str) -> dict | None:
         if result != 0:
             return None
 
-        # Connection succeeded — now verify it's actually a Tuya device
-        # by reading whatever the device sends (Tuya devices often send
-        # a heartbeat or respond to connection). If nothing comes, send
-        # a minimal probe packet and check the response prefix.
+        # Try to read auto-response (some devices send data on connect)
         try:
-            # Some Tuya devices send data immediately on connect
             sock.settimeout(1.5)
-            data = sock.recv(64)
+            data = sock.recv(1024)
             if data and _is_tuya_response(data):
                 _LOGGER.debug("Tuya device confirmed at %s (auto-response)", ip)
-                return _build_tcp_device(ip)
+                return _build_tcp_device(ip, data)
         except (TimeoutError, OSError):
             pass
 
@@ -200,10 +195,10 @@ def _probe_ip(ip: str) -> dict | None:
             probe = _build_probe_packet()
             sock.sendall(probe)
             sock.settimeout(2.0)
-            data = sock.recv(64)
+            data = sock.recv(1024)
             if data and _is_tuya_response(data):
                 _LOGGER.debug("Tuya device confirmed at %s (probe response)", ip)
-                return _build_tcp_device(ip)
+                return _build_tcp_device(ip, data)
         except (TimeoutError, OSError):
             pass
 
@@ -226,9 +221,69 @@ def _is_tuya_response(data: bytes) -> bool:
     return data[:4] in (PREFIX_55AA_BIN, PREFIX_6699_BIN)
 
 
+def _extract_version_from_payload(data: bytes) -> str:
+    """Try to extract the protocol version string from a raw Tuya response.
+
+    In v3.3 responses the payload area starts with the version string "3.3"
+    followed by 12 zero-bytes, then the encrypted payload. We look for this
+    pattern after the 16-byte 55AA header.
+    """
+    # 55AA header is 16 bytes; payload starts right after
+    if len(data) < 20:
+        return ""
+    payload_start = 16
+    ver_bytes = data[payload_start : payload_start + 3]
+    if ver_bytes in (b"3.3", b"3.4", b"3.5"):
+        return ver_bytes.decode()
+    return ""
+
+
+def _extract_info_from_response(data: bytes) -> dict:
+    """Try to extract device info from a raw Tuya TCP response.
+
+    Returns a dict with whatever we can determine: version, device_id.
+    """
+    info: dict[str, str] = {}
+
+    # Detect protocol by prefix
+    if data[:4] == PREFIX_6699_BIN:
+        info["version"] = "3.5"
+    elif data[:4] == PREFIX_55AA_BIN:
+        ver = _extract_version_from_payload(data)
+        if ver:
+            info["version"] = ver
+
+    # Try to find a JSON payload with gwId/devId (only works for unencrypted
+    # or v3.1 plaintext responses). Won't work for encrypted payloads, but
+    # it's worth trying since some devices respond with error JSONs in plaintext.
+    try:
+        text = data.decode("latin-1")
+        # Look for JSON-like patterns containing gwId or devId
+        for marker in ('"gwId"', '"devId"'):
+            idx = text.find(marker)
+            if idx >= 0:
+                # Find surrounding braces
+                start = text.rfind("{", 0, idx)
+                end = text.find("}", idx)
+                if start >= 0 and end >= 0:
+                    snippet = text[start : end + 1]
+                    try:
+                        parsed = json.loads(snippet)
+                        dev_id = parsed.get("gwId") or parsed.get("devId", "")
+                        if dev_id:
+                            info["id"] = dev_id
+                        break
+                    except json.JSONDecodeError:
+                        pass
+    except (UnicodeDecodeError, ValueError):
+        pass
+
+    return info
+
+
 def _build_probe_packet() -> bytes:
     """Build a minimal Tuya DP_QUERY packet to probe a device."""
-    from .message import DP_QUERY, pack_message
+    from .message import DP_QUERY
 
     msg = TuyaMessage(
         seqno=1,
@@ -241,16 +296,28 @@ def _build_probe_packet() -> bytes:
     return pack_message(msg)
 
 
-def _build_tcp_device(ip: str) -> dict:
-    """Build a device info dict for a TCP-discovered Tuya device."""
-    return {
-        "id": "",  # Unknown until user provides credentials
+def _build_tcp_device(ip: str, raw_response: bytes | None = None) -> dict:
+    """Build a device info dict for a TCP-discovered Tuya device.
+
+    Tries to extract version and device ID from the raw response data.
+    """
+    device: dict = {
+        "id": "",
         "ip": ip,
         "version": "unknown",
         "product_key": "",
         "encrypted": True,
         "discovered_via": "tcp_probe",
     }
+
+    if raw_response:
+        extracted = _extract_info_from_response(raw_response)
+        if extracted.get("version"):
+            device["version"] = extracted["version"]
+        if extracted.get("id"):
+            device["id"] = extracted["id"]
+
+    return device
 
 
 def _parse_network(network: str) -> list[str]:
