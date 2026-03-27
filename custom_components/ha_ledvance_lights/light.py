@@ -26,6 +26,7 @@ from .const import (
     DP_COLOR_TEMP,
     DP_MODE,
     DP_POWER,
+    DP_SCENE_NUM,
     KELVIN_COOL,
     KELVIN_WARM,
     SCENE_EFFECTS,
@@ -136,6 +137,14 @@ class LedvanceLight(CoordinatorEntity[LedvanceDataUpdateCoordinator], LightEntit
     @property
     def effect(self) -> str | None:
         """Return the current effect."""
+        if self.coordinator.data is None:
+            return None
+        mode = self.coordinator.data.get(str(DP_MODE))
+        if mode != "scene":
+            return None
+        scene_num = self.coordinator.data.get(str(DP_SCENE_NUM))
+        if scene_num is not None and 1 <= scene_num <= len(SCENE_EFFECTS):
+            return SCENE_EFFECTS[scene_num - 1]
         return None
 
     async def async_turn_on(self, **kwargs: Any) -> None:

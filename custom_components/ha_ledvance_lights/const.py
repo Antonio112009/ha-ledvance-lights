@@ -2,7 +2,7 @@
 
 from homeassistant.const import Platform
 
-VERSION = "1.2.2"
+VERSION = "1.3.0"
 
 DOMAIN = "ha_ledvance_lights"
 
@@ -80,6 +80,8 @@ def parse_hsv_hex(hex_str: str) -> tuple[float, float]:
     S: 0-1000 mapped to 0-100
     V/B component is ignored (brightness comes from DP 22)
     """
+    if not isinstance(hex_str, str) or len(hex_str) < 12:
+        raise ValueError(f"Expected a hex string of at least 12 characters, got: {hex_str!r}")
     h = int(hex_str[0:4], 16)
     s = int(hex_str[4:8], 16) / 10.0
     return (float(h), float(s))

@@ -9,7 +9,7 @@ from .coordinator import LedvanceConfigEntry, LedvanceDataUpdateCoordinator
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: LedvanceConfigEntry) -> bool:
-    """Set up Ledvance Smart+ WiFi from a config entry."""
+    """Set up Ledvance Lights from a config entry."""
     coordinator = LedvanceDataUpdateCoordinator(hass, entry)
     await coordinator.async_config_entry_first_refresh()
 
@@ -20,5 +20,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: LedvanceConfigEntry) -> 
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: LedvanceConfigEntry) -> bool:
-    """Unload a config entry."""
+    """Unload a config entry and close the device socket."""
+    coordinator: LedvanceDataUpdateCoordinator = entry.runtime_data
+    coordinator.device._close()
+
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)

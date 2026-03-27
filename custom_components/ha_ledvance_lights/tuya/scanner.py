@@ -224,9 +224,7 @@ def _probe_ip(ip: str) -> dict | None:
         return asyncio.run(_async_probe_ip(ip, sem, probe))
     # If already in an event loop, run in a new thread
     with ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(
-            asyncio.run, _async_probe_ip(ip, sem, probe)
-        ).result()
+        return pool.submit(asyncio.run, _async_probe_ip(ip, sem, probe)).result()
 
 
 def _is_tuya_response(data: bytes) -> bool:
@@ -441,9 +439,7 @@ def scan_network(network: str, timeout: float = 30.0) -> list[dict]:
             future = pool.submit(asyncio.run, _async_scan_network(network))
             return future.result(timeout=timeout)
     else:
-        return asyncio.run(
-            asyncio.wait_for(_async_scan_network(network), timeout=timeout)
-        )
+        return asyncio.run(asyncio.wait_for(_async_scan_network(network), timeout=timeout))
 
 
 # ─────────────────────────────────────────────
@@ -643,16 +639,18 @@ def detect_version(ip: str, timeout: float = 2.0) -> str:
     """
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(timeout)
-        sock.connect((ip, TCP_PORT))
+        try:
+            sock.settimeout(timeout)
+            sock.connect((ip, TCP_PORT))
 
-        probe = _build_probe_packet()
-        sock.sendall(probe)
-        data = sock.recv(1024)
-        sock.close()
+            probe = _build_probe_packet()
+            sock.sendall(probe)
+            data = sock.recv(1024)
 
-        if data and _is_tuya_response(data):
-            return _detect_version_from_response(data)
+            if data and _is_tuya_response(data):
+                return _detect_version_from_response(data)
+        finally:
+            sock.close()
     except OSError:
         pass
     return ""

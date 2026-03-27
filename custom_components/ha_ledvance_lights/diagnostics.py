@@ -157,8 +157,14 @@ async def async_get_config_entry_diagnostics(
         known_dp_keys = {
             str(dp)
             for dp in (
-                DP_POWER, DP_MODE, DP_BRIGHTNESS, DP_COLOR_TEMP,
-                DP_COLOR_HSV, DP_SCENE, DP_SCENE_NUM, DP_MUSIC,
+                DP_POWER,
+                DP_MODE,
+                DP_BRIGHTNESS,
+                DP_COLOR_TEMP,
+                DP_COLOR_HSV,
+                DP_SCENE,
+                DP_SCENE_NUM,
+                DP_MUSIC,
             )
         }
         all_keys = set(coordinator.data.keys())

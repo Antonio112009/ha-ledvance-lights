@@ -8,6 +8,7 @@ Then open http://localhost:8888 in your browser.
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 
@@ -62,7 +63,7 @@ async def index(request: web.Request) -> web.Response:
 async def api_status(request: web.Request) -> web.Response:
     data = await request.json()
     dev = _get_device(data)
-    result = await request.app.loop.run_in_executor(None, dev.status)
+    result = await asyncio.get_running_loop().run_in_executor(None, dev.status)
 
     # Enrich with human-readable values
     if "dps" in result:
@@ -87,8 +88,10 @@ async def api_status(request: web.Request) -> web.Response:
                 "kelvin": tuya_ct_to_kelvin(tuya_val),
             }
         if str(DP_COLOR_HSV) in dps:
-            h, s = parse_hsv_hex(dps[str(DP_COLOR_HSV)])
-            enriched["color"] = {"hue": h, "saturation": s}
+            hsv_hex = dps[str(DP_COLOR_HSV)]
+            if isinstance(hsv_hex, str) and len(hsv_hex) >= 12:
+                h, s = parse_hsv_hex(hsv_hex)
+                enriched["color"] = {"hue": h, "saturation": s}
         result["enriched"] = enriched
 
     return web.json_response(result)
@@ -99,7 +102,7 @@ async def api_power(request: web.Request) -> web.Response:
     data = await request.json()
     dev = _get_device(data)
     on = data.get("on", True)
-    result = await request.app.loop.run_in_executor(None, dev.set_status, on, DP_POWER)
+    result = await asyncio.get_running_loop().run_in_executor(None, dev.set_status, on, DP_POWER)
     return web.json_response(result)
 
 
@@ -109,7 +112,7 @@ async def api_brightness(request: web.Request) -> web.Response:
     dev = _get_device(data)
     ha_val = int(data["value"])
     tuya_val = ha_brightness_to_tuya(ha_val)
-    result = await request.app.loop.run_in_executor(None, dev.set_value, DP_BRIGHTNESS, tuya_val)
+    result = await asyncio.get_running_loop().run_in_executor(None, dev.set_value, DP_BRIGHTNESS, tuya_val)
     return web.json_response(result)
 
 
@@ -120,7 +123,7 @@ async def api_color_temp(request: web.Request) -> web.Response:
     kelvin = int(data["kelvin"])
     tuya_val = kelvin_to_tuya_ct(kelvin)
     values = {str(DP_MODE): "white", str(DP_COLOR_TEMP): tuya_val}
-    result = await request.app.loop.run_in_executor(None, dev.set_multiple_values, values)
+    result = await asyncio.get_running_loop().run_in_executor(None, dev.set_multiple_values, values)
     return web.json_response(result)
 
 
@@ -134,7 +137,7 @@ async def api_color(request: web.Request) -> web.Response:
     tuya_brightness = ha_brightness_to_tuya(brightness)
     hex_val = hs_to_tuya_hex(h, s, tuya_brightness)
     values = {str(DP_MODE): "colour", str(DP_COLOR_HSV): hex_val}
-    result = await request.app.loop.run_in_executor(None, dev.set_multiple_values, values)
+    result = await asyncio.get_running_loop().run_in_executor(None, dev.set_multiple_values, values)
     return web.json_response(result)
 
 
@@ -147,7 +150,7 @@ async def api_detect_version(request: web.Request) -> web.Response:
     local_key = data["local_key"]
 
     # Step 1: Quick probe to guess version from response structure
-    hint = await request.app.loop.run_in_executor(None, detect_version, ip)
+    hint = await asyncio.get_running_loop().run_in_executor(None, detect_version, ip)
 
     # Step 2: Order versions — hint first, then others
     all_versions = ["3.3", "3.4", "3.5"]
@@ -161,7 +164,7 @@ async def api_detect_version(request: web.Request) -> web.Response:
         dev = TuyaDevice(dev_id=dev_id, address=ip, local_key=local_key, version=ver)
         dev.set_socketTimeout(5)
         dev.set_socketRetryLimit(1)
-        result = await request.app.loop.run_in_executor(None, dev.status)
+        result = await asyncio.get_running_loop().run_in_executor(None, dev.status)
         if result and "dps" in result:
             return web.json_response({
                 "version": ver,
@@ -181,7 +184,7 @@ async def api_scan(request: web.Request) -> web.Response:
     data = await request.json()
     timeout = float(data.get("timeout", 5))
     network = data.get("network", "")
-    devices = await request.app.loop.run_in_executor(None, scan_devices, timeout, network)
+    devices = await asyncio.get_running_loop().run_in_executor(None, scan_devices, timeout, network)
     return web.json_response({"devices": devices})
 
 
@@ -191,7 +194,7 @@ async def api_raw(request: web.Request) -> web.Response:
     data = await request.json()
     dev = _get_device(data)
     dps = data.get("dps", {})
-    result = await request.app.loop.run_in_executor(None, dev.set_multiple_values, dps)
+    result = await asyncio.get_running_loop().run_in_executor(None, dev.set_multiple_values, dps)
     return web.json_response(result)
 
 
