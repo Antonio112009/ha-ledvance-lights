@@ -58,24 +58,18 @@ class LedvanceDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         result = await self.hass.async_add_executor_job(self.device.status)
 
         if not result or "dps" not in result:
-            raise UpdateFailed(
-                f"Failed to get status from device: {result}"
-            )
+            raise UpdateFailed(f"Failed to get status from device: {result}")
 
         return result["dps"]
 
     async def async_turn_on(self) -> None:
         """Turn the light on."""
-        await self.hass.async_add_executor_job(
-            self.device.set_status, True, DP_POWER
-        )
+        await self.hass.async_add_executor_job(self.device.set_status, True, DP_POWER)
         await self.async_request_refresh()
 
     async def async_turn_off(self) -> None:
         """Turn the light off."""
-        await self.hass.async_add_executor_job(
-            self.device.set_status, False, DP_POWER
-        )
+        await self.hass.async_add_executor_job(self.device.set_status, False, DP_POWER)
         await self.async_request_refresh()
 
     async def async_turn_on_with_attrs(

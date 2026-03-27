@@ -2,18 +2,15 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from homeassistant.components.diagnostics import async_redact_data
-from homeassistant.core import HomeAssistant
 
 from .const import (
     CONF_DEVICE_ID,
     CONF_IP_ADDRESS,
     CONF_LOCAL_KEY,
     CONF_PROTOCOL_VERSION,
-    DOMAIN,
     DP_BRIGHTNESS,
     DP_COLOR_HSV,
     DP_COLOR_TEMP,
@@ -26,7 +23,11 @@ from .const import (
     tuya_brightness_to_ha,
     tuya_ct_to_kelvin,
 )
-from .coordinator import LedvanceConfigEntry
+
+if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant
+
+    from .coordinator import LedvanceConfigEntry
 
 # Keys to redact from diagnostics output
 TO_REDACT_CONFIG = {CONF_LOCAL_KEY}
@@ -67,9 +68,7 @@ def _format_device_status(dps: dict[str, Any] | None) -> dict[str, Any]:
         formatted["brightness"] = {
             "tuya_value": brightness,
             "ha_value": tuya_brightness_to_ha(brightness),
-            "percent": round(
-                (brightness - 10) / (1000 - 10) * 100, 1
-            ),
+            "percent": round((brightness - 10) / (1000 - 10) * 100, 1),
         }
 
     # Color temperature
@@ -112,7 +111,19 @@ def _format_device_status(dps: dict[str, Any] | None) -> dict[str, Any]:
         formatted["music_mode"] = "ON" if music else "OFF"
 
     # Include any unknown DPs
-    known_dps = {str(dp) for dp in (DP_POWER, DP_MODE, DP_BRIGHTNESS, DP_COLOR_TEMP, DP_COLOR_HSV, DP_SCENE, DP_SCENE_NUM, DP_MUSIC)}
+    known_dps = {
+        str(dp)
+        for dp in (
+            DP_POWER,
+            DP_MODE,
+            DP_BRIGHTNESS,
+            DP_COLOR_TEMP,
+            DP_COLOR_HSV,
+            DP_SCENE,
+            DP_SCENE_NUM,
+            DP_MUSIC,
+        )
+    }
     unknown = {k: v for k, v in dps.items() if k not in known_dps}
     if unknown:
         formatted["unknown_dps"] = unknown
@@ -130,7 +141,9 @@ async def async_get_config_entry_diagnostics(
     # Connection health
     health: dict[str, Any] = {
         "last_update_success": coordinator.last_update_success,
-        "update_interval_seconds": coordinator.update_interval.total_seconds() if coordinator.update_interval else None,
+        "update_interval_seconds": (
+            coordinator.update_interval.total_seconds() if coordinator.update_interval else None
+        ),
     }
 
     if coordinator.last_update_success_time:

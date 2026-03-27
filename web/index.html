@@ -1,0 +1,580 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ledvance Tuya Test Interface</title>
+    <style>
+        :root {
+            --bg: #1a1a2e;
+            --card: #16213e;
+            --accent: #0f3460;
+            --highlight: #e94560;
+            --text: #eee;
+            --muted: #888;
+            --success: #4ecca3;
+            --error: #e94560;
+            --input-bg: #0f3460;
+            --border: #2a3a5c;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        h1 {
+            text-align: center;
+            margin-bottom: 24px;
+            font-size: 1.6rem;
+            color: var(--success);
+        }
+        h1 small { display: block; font-size: 0.75rem; color: var(--muted); font-weight: normal; margin-top: 4px; }
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+            max-width: 1100px;
+            margin: 0 auto;
+        }
+        @media (max-width: 768px) { .grid { grid-template-columns: 1fr; } }
+        .card {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 20px;
+        }
+        .card h2 {
+            font-size: 1rem;
+            margin-bottom: 16px;
+            color: var(--success);
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 8px;
+        }
+        .full-width { grid-column: 1 / -1; }
+        label {
+            display: block;
+            font-size: 0.8rem;
+            color: var(--muted);
+            margin-bottom: 4px;
+            margin-top: 12px;
+        }
+        label:first-of-type { margin-top: 0; }
+        input, select {
+            width: 100%;
+            padding: 8px 12px;
+            background: var(--input-bg);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            color: var(--text);
+            font-size: 0.9rem;
+        }
+        input:focus, select:focus {
+            outline: none;
+            border-color: var(--success);
+        }
+        input[type="range"] {
+            -webkit-appearance: none;
+            background: var(--accent);
+            height: 6px;
+            border-radius: 3px;
+            border: none;
+            padding: 0;
+        }
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 18px;
+            height: 18px;
+            background: var(--success);
+            border-radius: 50%;
+            cursor: pointer;
+        }
+        button {
+            padding: 8px 18px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.85rem;
+            font-weight: 600;
+            transition: opacity 0.2s;
+            margin-top: 12px;
+            margin-right: 6px;
+        }
+        button:hover { opacity: 0.85; }
+        button:disabled { opacity: 0.4; cursor: not-allowed; }
+        .btn-primary { background: var(--success); color: #111; }
+        .btn-on { background: #4ecca3; color: #111; }
+        .btn-off { background: var(--highlight); color: #fff; }
+        .btn-scan { background: #e9a945; color: #111; }
+        .btn-small { padding: 6px 12px; font-size: 0.8rem; margin-top: 8px; }
+        .row { display: flex; gap: 10px; align-items: flex-end; }
+        .row > * { flex: 1; }
+        .slider-row {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-top: 8px;
+        }
+        .slider-row input[type="range"] { flex: 1; }
+        .slider-row .val {
+            min-width: 40px;
+            text-align: right;
+            font-size: 0.85rem;
+            color: var(--success);
+        }
+        #log {
+            background: #0a0a1a;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 12px;
+            font-family: 'SF Mono', 'Fira Code', monospace;
+            font-size: 0.78rem;
+            line-height: 1.5;
+            max-height: 400px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+        .log-entry { margin-bottom: 6px; }
+        .log-time { color: var(--muted); }
+        .log-ok { color: var(--success); }
+        .log-err { color: var(--error); }
+        .log-info { color: #6c9bef; }
+        .status-bar {
+            display: flex;
+            gap: 16px;
+            flex-wrap: wrap;
+            margin-top: 12px;
+        }
+        .status-item {
+            background: var(--accent);
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 0.8rem;
+        }
+        .status-item strong { color: var(--success); }
+        .scan-result {
+            background: var(--accent);
+            border-radius: 8px;
+            padding: 10px 14px;
+            margin-top: 8px;
+            font-size: 0.85rem;
+            cursor: pointer;
+            border: 1px solid transparent;
+            transition: border-color 0.2s;
+        }
+        .scan-result:hover { border-color: var(--success); }
+        .scan-result .ip { color: var(--success); font-weight: 600; }
+        .scan-result .id { color: var(--muted); font-size: 0.75rem; }
+        .color-preview {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            border: 2px solid var(--border);
+            display: inline-block;
+            vertical-align: middle;
+            margin-left: 8px;
+        }
+        .hidden { display: none; }
+        .checkbox-label {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            cursor: pointer;
+            font-size: 0.85rem;
+            color: var(--text);
+        }
+        .checkbox-label input[type="checkbox"] {
+            width: 16px;
+            height: 16px;
+            accent-color: var(--success);
+        }
+        .scan-result .badge {
+            display: inline-block;
+            font-size: 0.7rem;
+            padding: 2px 8px;
+            border-radius: 10px;
+            margin-left: 8px;
+            font-weight: 600;
+        }
+        .badge-tuya { background: var(--success); color: #111; }
+        .badge-udp { background: #6c9bef; color: #111; }
+        .badge-tcp { background: #e9a945; color: #111; }
+    </style>
+</head>
+<body>
+    <h1>
+        Ledvance Tuya Test Interface
+        <small>Local device testing without Home Assistant</small>
+    </h1>
+
+    <div class="grid">
+        <!-- Connection Card -->
+        <div class="card">
+            <h2>🔌 Connection</h2>
+            <label for="ip">IP Address</label>
+            <input type="text" id="ip" placeholder="192.168.1.100" value="">
+
+            <label for="devid">Device ID</label>
+            <input type="text" id="devid" placeholder="bf4475a0f148dea6af43xb">
+
+            <label for="key">Local Key</label>
+            <input type="text" id="key" placeholder="0123456789abcdef">
+
+            <div class="row">
+                <div>
+                    <label for="version">Protocol Version</label>
+                    <select id="version">
+                        <option value="3.3" selected>3.3</option>
+                        <option value="3.4">3.4</option>
+                        <option value="3.5">3.5</option>
+                    </select>
+                </div>
+            </div>
+
+            <button class="btn-primary" onclick="getStatus()">📡 Get Status</button>
+            <button class="btn-primary btn-small" onclick="autoDetectVersion()">🔍 Auto-detect Version</button>
+
+            <div id="status-display" class="status-bar hidden"></div>
+        </div>
+
+        <!-- Controls Card -->
+        <div class="card">
+            <h2>💡 Controls</h2>
+
+            <div style="display:flex; gap:8px; margin-bottom:12px;">
+                <button class="btn-on" onclick="setPower(true)" style="flex:1">⚡ Turn ON</button>
+                <button class="btn-off" onclick="setPower(false)" style="flex:1">⬛ Turn OFF</button>
+            </div>
+
+            <label>Brightness</label>
+            <div class="slider-row">
+                <input type="range" id="brightness" min="0" max="255" value="128"
+                       oninput="document.getElementById('bval').textContent=this.value">
+                <span class="val" id="bval">128</span>
+            </div>
+            <button class="btn-primary btn-small" onclick="setBrightness()">Set Brightness</button>
+
+            <label>Color Temperature</label>
+            <div class="slider-row">
+                <input type="range" id="ct" min="2700" max="6500" value="4000"
+                       oninput="document.getElementById('ctval').textContent=this.value+'K'">
+                <span class="val" id="ctval">4000K</span>
+            </div>
+            <button class="btn-primary btn-small" onclick="setColorTemp()">Set Color Temp</button>
+
+            <label>Color (HS)</label>
+            <div class="row">
+                <div>
+                    <label for="hue">Hue (0-360)</label>
+                    <input type="number" id="hue" min="0" max="360" value="0"
+                           oninput="updateColorPreview()">
+                </div>
+                <div>
+                    <label for="sat">Sat (0-100)</label>
+                    <input type="number" id="sat" min="0" max="100" value="100"
+                           oninput="updateColorPreview()">
+                </div>
+                <div style="flex:0">
+                    <label>&nbsp;</label>
+                    <div id="color-preview" class="color-preview" style="background:hsl(0,100%,50%)"></div>
+                </div>
+            </div>
+            <button class="btn-primary btn-small" onclick="setColor()">Set Color</button>
+        </div>
+
+        <!-- Scanner Card -->
+        <div class="card">
+            <h2>📡 Network Scanner</h2>
+            <label for="scan-network">Network (optional)</label>
+            <input type="text" id="scan-network" placeholder="192.168.1.0/24 or leave empty for UDP broadcast">
+
+            <div class="row" style="align-items:center">
+                <div>
+                    <label for="scan-timeout">Timeout (seconds)</label>
+                    <input type="number" id="scan-timeout" value="10" min="1" max="60">
+                </div>
+                <div style="flex:0;white-space:nowrap;padding-top:20px">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="tuya-only" checked>
+                        <span>Tuya devices only</span>
+                    </label>
+                </div>
+            </div>
+
+            <button class="btn-scan" onclick="scanNetwork()">🔍 Scan Network</button>
+            <div id="scan-status" style="color:var(--muted);font-size:0.8rem;margin-top:8px"></div>
+
+            <div id="scan-results"></div>
+        </div>
+
+        <!-- Raw DPS Card -->
+        <div class="card">
+            <h2>🔧 Raw DPS Command</h2>
+            <label for="raw-dps">DPS JSON</label>
+            <input type="text" id="raw-dps" placeholder='{"20": true, "22": 500}' value='{"20": true}'>
+            <button class="btn-primary" onclick="sendRaw()">Send Raw DPS</button>
+        </div>
+
+        <!-- Log Card -->
+        <div class="card full-width">
+            <h2>📋 Log
+                <button class="btn-small" style="float:right;margin-top:-4px;background:var(--accent);color:var(--muted)"
+                        onclick="clearLog()">Clear</button>
+            </h2>
+            <div id="log"></div>
+        </div>
+    </div>
+
+    <script>
+        function getCredentials() {
+            return {
+                ip_address: document.getElementById('ip').value.trim(),
+                device_id: document.getElementById('devid').value.trim(),
+                local_key: document.getElementById('key').value.trim(),
+                version: document.getElementById('version').value,
+            };
+        }
+
+        function log(msg, cls = 'log-info') {
+            const el = document.getElementById('log');
+            const time = new Date().toLocaleTimeString();
+            const entry = document.createElement('div');
+            entry.className = 'log-entry';
+            if (typeof msg === 'object') {
+                msg = JSON.stringify(msg, null, 2);
+            }
+            entry.innerHTML = `<span class="log-time">[${time}]</span> <span class="${cls}">${escapeHtml(msg)}</span>`;
+            el.appendChild(entry);
+            el.scrollTop = el.scrollHeight;
+        }
+
+        function escapeHtml(str) {
+            return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        }
+
+        function clearLog() {
+            document.getElementById('log').innerHTML = '';
+        }
+
+        async function apiCall(endpoint, body) {
+            const creds = getCredentials();
+            if (endpoint !== '/api/scan' && (!creds.ip_address || !creds.device_id || !creds.local_key)) {
+                log('Please fill in IP, Device ID, and Local Key', 'log-err');
+                return null;
+            }
+            const data = { ...creds, ...body };
+            log(`→ ${endpoint}  ${JSON.stringify(body || {})}`, 'log-info');
+            try {
+                const resp = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data),
+                });
+                const result = await resp.json();
+                if (result.Err) {
+                    log(`✗ Error ${result.Err}: ${result.Error}`, 'log-err');
+                } else {
+                    log(`✓ ${JSON.stringify(result, null, 2)}`, 'log-ok');
+                }
+                return result;
+            } catch (e) {
+                log(`✗ Network error: ${e.message}`, 'log-err');
+                return null;
+            }
+        }
+
+        function updateStatusDisplay(result) {
+            const el = document.getElementById('status-display');
+            if (!result || !result.dps) {
+                el.classList.add('hidden');
+                return;
+            }
+            el.classList.remove('hidden');
+            const dps = result.dps;
+            const enriched = result.enriched || {};
+            let html = '';
+            if (enriched.power) html += `<div class="status-item">Power: <strong>${enriched.power}</strong></div>`;
+            if (enriched.mode) html += `<div class="status-item">Mode: <strong>${enriched.mode}</strong></div>`;
+            if (enriched.brightness) html += `<div class="status-item">Brightness: <strong>${enriched.brightness.percent}%</strong></div>`;
+            if (enriched.color_temp) html += `<div class="status-item">Color Temp: <strong>${enriched.color_temp.kelvin}K</strong></div>`;
+            if (enriched.color) html += `<div class="status-item">Color: <strong>H${enriched.color.hue} S${enriched.color.saturation}%</strong></div>`;
+            el.innerHTML = html;
+        }
+
+        async function getStatus() {
+            const result = await apiCall('/api/status');
+            updateStatusDisplay(result);
+        }
+
+        async function autoDetectVersion() {
+            const creds = getCredentials();
+            if (!creds.ip_address || !creds.device_id || !creds.local_key) {
+                log('Please fill in IP, Device ID, and Local Key', 'log-err');
+                return;
+            }
+            log('Auto-detecting protocol version...', 'log-info');
+            for (const ver of ['3.5', '3.4', '3.3']) {
+                document.getElementById('version').value = ver;
+                log(`Trying version ${ver}...`, 'log-info');
+                const result = await apiCall('/api/status');
+                if (result && result.dps) {
+                    log(`✓ Detected version ${ver}!`, 'log-ok');
+                    updateStatusDisplay(result);
+                    return;
+                }
+            }
+            log('Could not auto-detect version. Check credentials.', 'log-err');
+        }
+
+        async function setPower(on) {
+            await apiCall('/api/power', { on });
+        }
+
+        async function setBrightness() {
+            const val = parseInt(document.getElementById('brightness').value);
+            await apiCall('/api/brightness', { value: val });
+        }
+
+        async function setColorTemp() {
+            const kelvin = parseInt(document.getElementById('ct').value);
+            await apiCall('/api/color_temp', { kelvin });
+        }
+
+        async function setColor() {
+            const hue = parseFloat(document.getElementById('hue').value);
+            const saturation = parseFloat(document.getElementById('sat').value);
+            const brightness = parseInt(document.getElementById('brightness').value);
+            await apiCall('/api/color', { hue, saturation, brightness });
+        }
+
+        function updateColorPreview() {
+            const h = parseInt(document.getElementById('hue').value) || 0;
+            const s = parseInt(document.getElementById('sat').value) || 100;
+            const preview = document.getElementById('color-preview');
+            preview.style.background = `hsl(${h}, ${s}%, ${50}%)`;
+        }
+
+        let lastScanResults = [];
+
+        async function scanNetwork() {
+            const network = document.getElementById('scan-network').value.trim();
+            const timeout = parseInt(document.getElementById('scan-timeout').value) || 10;
+            const statusEl = document.getElementById('scan-status');
+            statusEl.textContent = 'Scanning... this may take a moment';
+            log(`Scanning network... (timeout: ${timeout}s)`, 'log-info');
+
+            const result = await fetch('/api/scan', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ network, timeout }),
+            }).then(r => r.json()).catch(e => {
+                log(`Scan error: ${e.message}`, 'log-err');
+                return { devices: [] };
+            });
+
+            lastScanResults = result.devices || [];
+            statusEl.textContent = '';
+
+            if (lastScanResults.length === 0) {
+                document.getElementById('scan-results').innerHTML =
+                    '<div style="color:var(--muted);margin-top:12px;font-size:0.85rem">No devices found</div>';
+                log('No devices found', 'log-err');
+                return;
+            }
+
+            const tuyaCount = lastScanResults.filter(d => d.discovered_via !== 'tcp_probe' || d.id).length;
+            log(`Found ${lastScanResults.length} device(s) (${tuyaCount} confirmed Tuya)`, 'log-ok');
+            renderScanResults();
+        }
+
+        function renderScanResults() {
+            const container = document.getElementById('scan-results');
+            const tuyaOnly = document.getElementById('tuya-only').checked;
+            let devices = lastScanResults;
+
+            if (tuyaOnly) {
+                // Show only confirmed Tuya devices (UDP-discovered or TCP-verified)
+                devices = devices.filter(d => d.discovered_via === 'tcp_probe' || d.id);
+            }
+
+            if (devices.length === 0) {
+                container.innerHTML = '<div style="color:var(--muted);margin-top:12px;font-size:0.85rem">' +
+                    (tuyaOnly ? 'No confirmed Tuya devices found. Uncheck "Tuya devices only" to see all.' : 'No devices found') +
+                    '</div>';
+                return;
+            }
+
+            container.innerHTML = devices.map(d => {
+                const isTcp = d.discovered_via === 'tcp_probe';
+                const isUdp = !isTcp && d.id;
+                let badge = '';
+                if (isUdp) badge = '<span class="badge badge-udp">UDP</span>';
+                else if (isTcp) badge = '<span class="badge badge-tcp">TCP</span>';
+                badge += '<span class="badge badge-tuya">Tuya</span>';
+
+                const ver = d.version && d.version !== 'unknown' ? `v${d.version}` : '';
+                const idText = d.id || 'ID unknown';
+
+                return `<div class="scan-result" onclick="useDevice('${d.ip}', '${d.id || ''}', '${d.version || '3.3'}')">
+                    <span class="ip">${d.ip}</span>${badge}
+                    <span class="id">${idText} ${ver}</span>
+                </div>`;
+            }).join('');
+        }
+
+        // Re-render when filter checkbox changes
+        document.addEventListener('DOMContentLoaded', () => {
+            document.getElementById('tuya-only').addEventListener('change', renderScanResults);
+        });
+
+        function useDevice(ip, id, version) {
+            document.getElementById('ip').value = ip;
+            document.getElementById('devid').value = id;
+            document.getElementById('version').value = version;
+            log(`Selected device: ${ip} (${id})`, 'log-info');
+        }
+
+        async function sendRaw() {
+            const raw = document.getElementById('raw-dps').value.trim();
+            let dps;
+            try {
+                dps = JSON.parse(raw);
+            } catch {
+                log('Invalid JSON in DPS field', 'log-err');
+                return;
+            }
+            await apiCall('/api/raw', { dps });
+        }
+
+        // Load saved credentials from localStorage
+        window.addEventListener('load', () => {
+            const saved = localStorage.getItem('ledvance_creds');
+            if (saved) {
+                try {
+                    const c = JSON.parse(saved);
+                    if (c.ip) document.getElementById('ip').value = c.ip;
+                    if (c.devid) document.getElementById('devid').value = c.devid;
+                    if (c.key) document.getElementById('key').value = c.key;
+                    if (c.version) document.getElementById('version').value = c.version;
+                } catch {}
+            }
+            log('Ready. Enter device credentials and click "Get Status" to begin.', 'log-info');
+        });
+
+        // Save credentials to localStorage on change
+        for (const id of ['ip', 'devid', 'key', 'version']) {
+            document.getElementById(id).addEventListener('change', () => {
+                localStorage.setItem('ledvance_creds', JSON.stringify({
+                    ip: document.getElementById('ip').value,
+                    devid: document.getElementById('devid').value,
+                    key: document.getElementById('key').value,
+                    version: document.getElementById('version').value,
+                }));
+            });
+        }
+    </script>
+</body>
+</html>

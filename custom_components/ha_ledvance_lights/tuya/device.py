@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -16,15 +17,11 @@ from .message import (
     CONTROL_NEW,
     DP_QUERY,
     DP_QUERY_NEW,
-    FOOTER_55AA,
     FOOTER_6699,
-    FOOTER_HMAC,
-    HEADER_SIZE_55AA,
-    HEADER_SIZE_6699,
     NO_PROTOCOL_HEADER_CMDS,
     PREFIX_55AA,
-    PREFIX_6699,
     PREFIX_55AA_BIN,
+    PREFIX_6699,
     PREFIX_6699_BIN,
     PROTOCOL_33_HEADER,
     PROTOCOL_34_HEADER,
@@ -96,11 +93,11 @@ class TuyaDevice:
         self.version = version
         self._version_header = self._get_version_header()
 
-    def set_socketTimeout(self, timeout: int) -> None:
+    def set_socketTimeout(self, timeout: int) -> None:  # noqa: N802
         """Set socket timeout in seconds."""
         self._timeout = timeout
 
-    def set_socketRetryLimit(self, limit: int) -> None:
+    def set_socketRetryLimit(self, limit: int) -> None:  # noqa: N802
         """Set socket retry limit."""
         self._retry_limit = limit
 
@@ -131,26 +128,23 @@ class TuyaDevice:
             sock.settimeout(self._timeout)
             sock.connect((self.address, TUYA_PORT))
             self._socket = sock
-        except socket.timeout:
+        except TimeoutError:
             return False
         except OSError:
             return False
 
         # Session key negotiation for v3.4+
-        if self.version >= 3.4:
-            if not self._negotiate_session_key():
-                self._close()
-                return False
+        if self.version >= 3.4 and not self._negotiate_session_key():
+            self._close()
+            return False
 
         return True
 
     def _close(self) -> None:
         """Close the socket."""
         if self._socket:
-            try:
+            with contextlib.suppress(OSError):
                 self._socket.close()
-            except OSError:
-                pass
             self._socket = None
 
     def _negotiate_session_key(self) -> bool:
@@ -209,17 +203,13 @@ class TuyaDevice:
             self._send_raw(pack_message(msg, hmac_key=self.local_key))
 
             # Derive session key: XOR nonces then encrypt
-            xored = bytes(a ^ b for a, b in zip(local_nonce, remote_nonce))
+            xored = bytes(a ^ b for a, b in zip(local_nonce, remote_nonce, strict=False))
 
             if self.version >= 3.5:
-                _, ct, _ = aes_gcm_encrypt(
-                    self.local_key, xored, iv=local_nonce[:12]
-                )
+                _, ct, _ = aes_gcm_encrypt(self.local_key, xored, iv=local_nonce[:12])
                 self._session_key = ct[12:28] if len(ct) >= 28 else ct[:16]
             else:
-                self._session_key = aes_ecb_encrypt(
-                    self.local_key, xored, pad=False
-                )
+                self._session_key = aes_ecb_encrypt(self.local_key, xored, pad=False)
 
             return True
 
@@ -266,7 +256,7 @@ class TuyaDevice:
             data = data[prefix_offset:]
 
             # Parse header to find total length
-            prefix, seqno, cmd, payload_len, header_size = parse_header(data)
+            prefix, _seqno, _cmd, payload_len, header_size = parse_header(data)
 
             if prefix == PREFIX_6699:
                 total_len = header_size + payload_len + FOOTER_6699
@@ -305,7 +295,7 @@ class TuyaDevice:
                 if not chunk:
                     break
                 data += chunk
-        except socket.timeout:
+        except TimeoutError:
             pass
         return data
 
@@ -488,7 +478,7 @@ class TuyaDevice:
                     continue
                 return _error_json(ERR_PAYLOAD)
 
-            except socket.timeout:
+            except TimeoutError:
                 self._close()
                 if attempt < self._retry_limit:
                     continue

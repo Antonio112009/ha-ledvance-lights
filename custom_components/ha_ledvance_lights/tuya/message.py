@@ -113,13 +113,8 @@ def _pack_55aa(msg: TuyaMessage, hmac_key: bytes | None) -> bytes:
     """Pack a 0x55AA-prefix message."""
     payload = msg.payload
 
-    if hmac_key:
-        # HMAC footer: 32-byte HMAC + 4-byte suffix
-        footer_size = FOOTER_HMAC
-    else:
-        # CRC footer: 4-byte CRC + 4-byte suffix
-        footer_size = FOOTER_55AA
-
+    # HMAC footer: 32-byte HMAC + suffix; CRC footer: 4-byte CRC + suffix
+    footer_size = FOOTER_HMAC if hmac_key else FOOTER_55AA
     length = len(payload) + footer_size
 
     header = struct.pack(HEADER_FMT_55AA, PREFIX_55AA, msg.seqno, msg.cmd, length)
@@ -141,15 +136,12 @@ def _pack_6699(msg: TuyaMessage, key: bytes) -> bytes:
     if msg.retcode is not None:
         payload = struct.pack(RETCODE_FMT, msg.retcode) + payload
 
-    # Build header first (without length) for AAD
+    # Build nonce for GCM
     nonce = msg.iv if msg.iv else b"\x00" * 12
-    header_no_len = struct.pack(">IHI", PREFIX_6699, 0, msg.seqno)
 
     # Encrypt with GCM — AAD is header from byte 4 onwards + cmd bytes
     # We need to know the total structure to compute AAD
-    iv, ciphertext, tag = aes_gcm_encrypt(
-        key, payload, iv=nonce, aad=None
-    )
+    iv, ciphertext, tag = aes_gcm_encrypt(key, payload, iv=nonce, aad=None)
 
     # Payload area = IV + ciphertext + tag
     encrypted_blob = iv + ciphertext + tag
@@ -192,9 +184,7 @@ def parse_header(data: bytes) -> tuple[int, int, int, int, int]:
     if prefix == PREFIX_6699:
         if len(data) < HEADER_SIZE_6699:
             raise DecodeError("Not enough data for 6699 header")
-        _, _, seqno, cmd, length = struct.unpack(
-            HEADER_FMT_6699, data[:HEADER_SIZE_6699]
-        )
+        _, _, seqno, cmd, length = struct.unpack(HEADER_FMT_6699, data[:HEADER_SIZE_6699])
         if length > MAX_PAYLOAD_SIZE:
             raise DecodeError(f"Payload too large: {length}")
         return prefix, seqno, cmd, length, HEADER_SIZE_6699
@@ -202,9 +192,7 @@ def parse_header(data: bytes) -> tuple[int, int, int, int, int]:
     raise DecodeError(f"Unknown prefix: 0x{prefix:08X}")
 
 
-def unpack_message(
-    data: bytes, hmac_key: bytes | None = None
-) -> TuyaMessage:
+def unpack_message(data: bytes, hmac_key: bytes | None = None) -> TuyaMessage:
     """Unpack wire-format bytes into a TuyaMessage."""
     prefix, seqno, cmd, payload_len, header_size = parse_header(data)
 
@@ -222,11 +210,7 @@ def _unpack_55aa(
     hmac_key: bytes | None,
 ) -> TuyaMessage:
     """Unpack a 0x55AA message."""
-    # Determine footer type
-    if hmac_key:
-        footer_size = FOOTER_HMAC
-    else:
-        footer_size = FOOTER_55AA
+    footer_size = FOOTER_HMAC if hmac_key else FOOTER_55AA
 
     payload_end = header_size + payload_len - footer_size
     payload = data[header_size:payload_end]

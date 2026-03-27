@@ -24,7 +24,7 @@ from .tuya import TuyaDevice, scan_devices
 
 _LOGGER = logging.getLogger(__name__)
 
-STEP_USER_DATA_SCHEMA = vol.Schema(
+STEP_MANUAL_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_IP_ADDRESS): str,
         vol.Required(CONF_DEVICE_ID): str,
@@ -69,25 +69,17 @@ def _test_connection(data: dict[str, Any]) -> ConnectionResult:
                 dps=result["dps"],
             )
 
-        # Check error code
         err_code = result.get("Err", "") if result else ""
 
         if err_code in (ERR_CONNECT, ERR_OFFLINE):
-            # No device at this IP — no point trying other versions
-            return ConnectionResult(
-                success=False,
-                error="device_not_found",
-            )
+            return ConnectionResult(success=False, error="device_not_found")
 
         if err_code in (ERR_PAYLOAD, ERR_KEY_OR_VER):
-            # Wrong key or version — try next version
             last_error = "invalid_key"
             continue
 
-        # Unknown error
         last_error = "cannot_connect"
 
-    # All versions failed
     return ConnectionResult(success=False, error=last_error or "cannot_connect")
 
 
@@ -101,13 +93,13 @@ class LedvanceWifiConfigFlow(ConfigFlow, domain=DOMAIN):
         self._discovered_devices: list[dict] = []
         self._selected_device: dict | None = None
 
-    async def async_step_user(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Initial step — choose to scan or enter manually."""
+    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Initial step — choose scan (with optional network) or manual."""
         if user_input is not None:
             action = user_input.get("action", "manual")
             if action == "scan":
+                # Store network for the scan step
+                self._scan_network = user_input.get("network", "").strip() or None
                 return await self.async_step_scan()
             return await self.async_step_manual()
 
@@ -116,24 +108,28 @@ class LedvanceWifiConfigFlow(ConfigFlow, domain=DOMAIN):
             data_schema=vol.Schema(
                 {
                     vol.Required("action", default="scan"): vol.In(
-                        {"scan": "Scan network for devices", "manual": "Enter manually"}
+                        {
+                            "scan": "Scan network for devices",
+                            "manual": "Enter device details manually",
+                        }
                     ),
+                    vol.Optional("network"): str,
                 }
             ),
         )
 
-    async def async_step_scan(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_scan(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Scan the network for Tuya devices."""
-        errors: dict[str, str] = {}
-
         if user_input is not None:
             # User selected a device from the scan results
             selected_id = user_input.get("device")
             if selected_id:
                 self._selected_device = next(
-                    (d for d in self._discovered_devices if d["id"] == selected_id),
+                    (
+                        d
+                        for d in self._discovered_devices
+                        if d["id"] == selected_id or f"tcp_{d['ip']}" == selected_id
+                    ),
                     None,
                 )
                 if self._selected_device:
@@ -141,48 +137,63 @@ class LedvanceWifiConfigFlow(ConfigFlow, domain=DOMAIN):
 
         # Run the scan
         try:
+            network = getattr(self, "_scan_network", None)
             self._discovered_devices = await self.hass.async_add_executor_job(
-                scan_devices, 10.0
+                scan_devices, 10.0, network
             )
         except Exception:
             _LOGGER.exception("Error scanning for devices")
             self._discovered_devices = []
 
         if not self._discovered_devices:
-            errors["base"] = "no_devices_found"
-            # Fall back to manual entry
-            return self.async_show_form(
-                step_id="scan",
-                data_schema=vol.Schema({}),
-                errors=errors,
-                description_placeholders={"message": "No devices found. Try manual entry."},
-            )
+            # No devices found — go straight to manual entry
+            return await self.async_step_manual(_show_scan_failed=True)
 
-        # Build device selection
-        device_options = {
-            d["id"]: f"{d['ip']} (v{d['version']}) — {d['id'][-8:]}"
-            for d in self._discovered_devices
-        }
+        # Build device selection list
+        device_options = {}
+        for d in self._discovered_devices:
+            discovered_via = d.get("discovered_via", "udp")
+            if discovered_via == "tcp_probe":
+                # TCP probe: no device ID, show IP only
+                key = f"tcp_{d['ip']}"
+                label = f"{d['ip']} (found via network scan)"
+            else:
+                # UDP broadcast: has device ID and version
+                key = d["id"]
+                label = f"{d['ip']} (v{d['version']}) — {d['id'][-8:]}"
+            device_options[key] = label
 
         return self.async_show_form(
             step_id="scan",
-            data_schema=vol.Schema(
-                {vol.Required("device"): vol.In(device_options)}
-            ),
-            errors=errors,
+            data_schema=vol.Schema({vol.Required("device"): vol.In(device_options)}),
         )
 
     async def async_step_credentials(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Enter local key for the selected device."""
+        """Enter credentials for the selected device."""
         errors: dict[str, str] = {}
+        dev = self._selected_device or {}
+        ip = dev.get("ip", "unknown")
+        dev_id = dev.get("id", "")
+        is_tcp_probe = dev.get("discovered_via") == "tcp_probe"
 
-        if user_input is not None and self._selected_device:
-            # Combine scanned info with user-provided key
+        # TCP probe devices need both device_id and local_key
+        # UDP discovered devices only need local_key
+        if is_tcp_probe:
+            schema = vol.Schema(
+                {
+                    vol.Required(CONF_DEVICE_ID): str,
+                    vol.Required(CONF_LOCAL_KEY): str,
+                }
+            )
+        else:
+            schema = vol.Schema({vol.Required(CONF_LOCAL_KEY): str})
+
+        if user_input is not None:
             connection_data = {
-                CONF_IP_ADDRESS: self._selected_device["ip"],
-                CONF_DEVICE_ID: self._selected_device["id"],
+                CONF_IP_ADDRESS: ip,
+                CONF_DEVICE_ID: user_input.get(CONF_DEVICE_ID, dev_id),
                 CONF_LOCAL_KEY: user_input[CONF_LOCAL_KEY],
             }
 
@@ -190,9 +201,7 @@ class LedvanceWifiConfigFlow(ConfigFlow, domain=DOMAIN):
             self._abort_if_unique_id_configured()
 
             try:
-                result = await self.hass.async_add_executor_job(
-                    _test_connection, connection_data
-                )
+                result = await self.hass.async_add_executor_job(_test_connection, connection_data)
             except Exception:
                 _LOGGER.exception("Unexpected error connecting to device")
                 errors["base"] = "cannot_connect"
@@ -210,32 +219,30 @@ class LedvanceWifiConfigFlow(ConfigFlow, domain=DOMAIN):
                     )
                 errors["base"] = result.error or "cannot_connect"
 
-        ip = self._selected_device["ip"] if self._selected_device else "unknown"
-        dev_id = self._selected_device["id"] if self._selected_device else "unknown"
-
         return self.async_show_form(
             step_id="credentials",
-            data_schema=vol.Schema(
-                {vol.Required(CONF_LOCAL_KEY): str}
-            ),
+            data_schema=schema,
             errors=errors,
-            description_placeholders={"ip": ip, "device_id": dev_id},
+            description_placeholders={"ip": ip, "device_id": dev_id or "unknown"},
         )
 
     async def async_step_manual(
-        self, user_input: dict[str, Any] | None = None
+        self,
+        user_input: dict[str, Any] | None = None,
+        _show_scan_failed: bool = False,
     ) -> ConfigFlowResult:
         """Manual device entry."""
         errors: dict[str, str] = {}
+
+        if _show_scan_failed:
+            errors["base"] = "no_devices_found"
 
         if user_input is not None:
             await self.async_set_unique_id(user_input[CONF_DEVICE_ID])
             self._abort_if_unique_id_configured()
 
             try:
-                result = await self.hass.async_add_executor_job(
-                    _test_connection, user_input
-                )
+                result = await self.hass.async_add_executor_job(_test_connection, user_input)
             except Exception:
                 _LOGGER.exception("Unexpected error connecting to Ledvance device")
                 errors["base"] = "cannot_connect"
@@ -255,6 +262,6 @@ class LedvanceWifiConfigFlow(ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="manual",
-            data_schema=STEP_USER_DATA_SCHEMA,
+            data_schema=STEP_MANUAL_SCHEMA,
             errors=errors,
         )

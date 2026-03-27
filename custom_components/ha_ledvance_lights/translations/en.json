@@ -3,9 +3,13 @@
     "step": {
       "user": {
         "title": "Add Ledvance Light",
-        "description": "Choose how to add your device.",
+        "description": "Choose how to add your device. Optionally specify a network to scan across VLANs.",
         "data": {
-          "action": "Setup method"
+          "action": "Setup method",
+          "network": "Network to scan (optional)"
+        },
+        "data_description": {
+          "network": "For cross-VLAN scanning. Examples: 192.168.2.0/24, 10.0.0.1-254, or a single IP"
         }
       },
       "scan": {
@@ -16,12 +20,14 @@
         }
       },
       "credentials": {
-        "title": "Enter Local Key",
-        "description": "Device found at {ip} (ID: {device_id}). Enter the local key to connect.",
+        "title": "Enter Credentials",
+        "description": "Device found at {ip} (ID: {device_id}). Enter the credentials to connect.",
         "data": {
+          "device_id": "Device ID",
           "local_key": "Local key (API key)"
         },
         "data_description": {
+          "device_id": "Tuya device ID (find via TinyTuya wizard or Tuya IoT Platform)",
           "local_key": "Find via TinyTuya wizard or Tuya IoT Platform"
         }
       },
@@ -44,7 +50,7 @@
       "device_not_found": "No device found at this IP address. Check the IP and make sure the device is online.",
       "invalid_key": "Invalid Device ID or Local Key. Please check your credentials.",
       "cannot_connect": "Cannot connect to the device. Please try again.",
-      "no_devices_found": "No Tuya devices found on your network. Try manual entry instead."
+      "no_devices_found": "No devices found on your network. Enter your device details manually below."
     },
     "abort": {
       "already_configured": "This device is already configured."

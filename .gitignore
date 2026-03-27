@@ -1,6 +1,9 @@
 # Dependencies (external)
 tinytuya-repo/
 
+# Virtual environment
+.venv/
+
 # Python
 __pycache__/
 *.py[cod]
