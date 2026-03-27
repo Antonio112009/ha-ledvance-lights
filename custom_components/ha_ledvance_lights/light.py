@@ -171,8 +171,22 @@ class LedvanceLight(CoordinatorEntity[LedvanceDataUpdateCoordinator], LightEntit
             if brightness_tuya is not None:
                 v = brightness_tuya
             else:
-                v = self.coordinator.data.get(str(DP_BRIGHTNESS), TUYA_BRIGHTNESS_MAX)
+                v = (self.coordinator.data or {}).get(
+                    str(DP_BRIGHTNESS), TUYA_BRIGHTNESS_MAX
+                )
             hsv_hex = hs_to_tuya_hex(h, s, v)
+        elif brightness_tuya is not None and self.color_mode == ColorMode.HS:
+            # Brightness-only change while in colour mode: update the HSV hex
+            # with the new V value so the device stays in colour mode instead
+            # of switching to white mode via DP_BRIGHTNESS.
+            data = self.coordinator.data or {}
+            current_hsv = data.get(str(DP_COLOR_HSV), "")
+            if current_hsv and len(current_hsv) >= 12:
+                h_cur, s_cur = parse_hsv_hex(current_hsv)
+                hsv_hex = hs_to_tuya_hex(h_cur, s_cur, brightness_tuya)
+            else:
+                # No existing colour data — default to red at requested brightness
+                hsv_hex = hs_to_tuya_hex(0.0, 100.0, brightness_tuya)
 
         await self.coordinator.async_turn_on_with_attrs(
             brightness=brightness_tuya,

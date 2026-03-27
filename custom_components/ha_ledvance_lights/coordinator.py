@@ -62,15 +62,26 @@ class LedvanceDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         return result["dps"]
 
+    def _apply_optimistic_update(self, dps: dict[str, Any]) -> None:
+        """Apply DPs to local data immediately so the UI reflects changes instantly.
+
+        This prevents the brief flicker to 0 / stale values that occurs when the
+        device hasn't finished applying the command before the next poll.
+        """
+        if not hasattr(self, "data") or self.data is None:
+            return
+        updated = {**self.data, **dps}
+        self.async_set_updated_data(updated)
+
     async def async_turn_on(self) -> None:
         """Turn the light on."""
         await self.hass.async_add_executor_job(self.device.set_status, True, DP_POWER)
-        await self.async_request_refresh()
+        self._apply_optimistic_update({str(DP_POWER): True})
 
     async def async_turn_off(self) -> None:
         """Turn the light off."""
         await self.hass.async_add_executor_job(self.device.set_status, False, DP_POWER)
-        await self.async_request_refresh()
+        self._apply_optimistic_update({str(DP_POWER): False})
 
     async def async_turn_on_with_attrs(
         self,
@@ -82,7 +93,9 @@ class LedvanceDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Turn on and set attributes in a single command.
 
         Batches all DP changes into one set_multiple_values call to avoid
-        multiple TCP connections.
+        multiple TCP connections.  After sending, applies an optimistic update
+        so the UI reflects the new state immediately without waiting for the
+        next poll cycle.
         """
         dps: dict[str, Any] = {str(DP_POWER): True}
 
@@ -95,8 +108,10 @@ class LedvanceDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             dps[str(DP_MODE)] = "white"
             dps[str(DP_COLOR_TEMP)] = color_temp
 
-        if brightness is not None:
+        if brightness is not None and hsv_hex is None:
+            # Only set DP_BRIGHTNESS for white/CT mode.
+            # In colour mode, brightness is encoded inside the HSV hex string.
             dps[str(DP_BRIGHTNESS)] = brightness
 
         await self.hass.async_add_executor_job(self.device.set_multiple_values, dps)
-        await self.async_request_refresh()
+        self._apply_optimistic_update(dps)

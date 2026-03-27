@@ -50,6 +50,16 @@ def _make_coordinator(mock_tuya_device, mock_entry_data):
         coordinator = LedvanceDataUpdateCoordinator(mock_hass, mock_entry)
         coordinator.hass = mock_hass
         coordinator.async_request_refresh = AsyncMock()
+        coordinator.async_set_updated_data = MagicMock()
+        # Pre-populate data so optimistic updates work
+        coordinator.data = {
+            "20": True,
+            "21": "white",
+            "22": 500,
+            "23": 500,
+            "24": "00b401f40320",
+            "26": 1,
+        }
         return coordinator
 
 
@@ -187,13 +197,31 @@ class TestAsyncTurnOnWithAttrs:
         assert dps == {str(DP_POWER): True}
 
     @pytest.mark.asyncio
-    async def test_requests_refresh_after(self, mock_tuya_device, mock_entry_data):
-        """Test that async_request_refresh is called after setting values."""
+    async def test_optimistic_update_after(self, mock_tuya_device, mock_entry_data):
+        """Test that optimistic update is applied after setting values."""
         coordinator = _make_coordinator(mock_tuya_device, mock_entry_data)
 
         await coordinator.async_turn_on_with_attrs(brightness=500)
 
-        coordinator.async_request_refresh.assert_awaited_once()
+        coordinator.async_set_updated_data.assert_called_once()
+        updated = coordinator.async_set_updated_data.call_args[0][0]
+        assert updated[str(DP_POWER)] is True
+        assert updated[str(DP_BRIGHTNESS)] == 500
+
+    @pytest.mark.asyncio
+    async def test_hsv_brightness_not_sent_as_dp22(self, mock_tuya_device, mock_entry_data):
+        """Test that brightness is NOT sent as DP22 when HSV is set."""
+        coordinator = _make_coordinator(mock_tuya_device, mock_entry_data)
+
+        await coordinator.async_turn_on_with_attrs(
+            hsv_hex="007803e803e8", brightness=500
+        )
+
+        dps = mock_tuya_device.set_multiple_values.call_args[0][0]
+        assert dps[str(DP_MODE)] == "colour"
+        assert dps[str(DP_COLOR_HSV)] == "007803e803e8"
+        # DP_BRIGHTNESS should NOT be set when HSV is active
+        assert str(DP_BRIGHTNESS) not in dps
 
 
 class TestAsyncTurnOff:
@@ -209,13 +237,15 @@ class TestAsyncTurnOff:
         mock_tuya_device.set_status.assert_called_once_with(False, DP_POWER)
 
     @pytest.mark.asyncio
-    async def test_turn_off_requests_refresh(self, mock_tuya_device, mock_entry_data):
-        """Test that turn_off requests a refresh."""
+    async def test_turn_off_optimistic_update(self, mock_tuya_device, mock_entry_data):
+        """Test that turn_off applies optimistic update."""
         coordinator = _make_coordinator(mock_tuya_device, mock_entry_data)
 
         await coordinator.async_turn_off()
 
-        coordinator.async_request_refresh.assert_awaited_once()
+        coordinator.async_set_updated_data.assert_called_once()
+        updated = coordinator.async_set_updated_data.call_args[0][0]
+        assert updated[str(DP_POWER)] is False
 
 
 class TestAsyncTurnOn:
@@ -231,10 +261,12 @@ class TestAsyncTurnOn:
         mock_tuya_device.set_status.assert_called_once_with(True, DP_POWER)
 
     @pytest.mark.asyncio
-    async def test_turn_on_requests_refresh(self, mock_tuya_device, mock_entry_data):
-        """Test that turn_on requests a refresh."""
+    async def test_turn_on_optimistic_update(self, mock_tuya_device, mock_entry_data):
+        """Test that turn_on applies optimistic update."""
         coordinator = _make_coordinator(mock_tuya_device, mock_entry_data)
 
         await coordinator.async_turn_on()
 
-        coordinator.async_request_refresh.assert_awaited_once()
+        coordinator.async_set_updated_data.assert_called_once()
+        updated = coordinator.async_set_updated_data.call_args[0][0]
+        assert updated[str(DP_POWER)] is True
