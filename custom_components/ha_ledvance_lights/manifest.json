@@ -4,9 +4,10 @@
   "codeowners": ["@Antonio112009"],
   "config_flow": true,
   "dependencies": [],
-  "documentation": "https://github.com/antonio112009/ha-ledvance-lights",
+  "documentation": "https://github.com/Antonio112009/ha-ledvance-lights",
   "integration_type": "device",
   "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/Antonio112009/ha-ledvance-lights/issues",
   "requirements": [],
-  "version": "1.3.0"
+  "version": "1.3.1"
 }

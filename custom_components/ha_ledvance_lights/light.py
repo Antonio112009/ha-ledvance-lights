@@ -9,10 +9,9 @@ from homeassistant.components.light import (
     ATTR_COLOR_TEMP_KELVIN,
     ATTR_EFFECT,
     ATTR_HS_COLOR,
-    ColorMode,
     LightEntity,
-    LightEntityFeature,
 )
+from homeassistant.components.light.const import ColorMode, LightEntityFeature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
