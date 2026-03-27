@@ -209,8 +209,8 @@ class TestAsyncTurnOnWithAttrs:
         assert updated[str(DP_BRIGHTNESS)] == 500
 
     @pytest.mark.asyncio
-    async def test_hsv_brightness_not_sent_as_dp22(self, mock_tuya_device, mock_entry_data):
-        """Test that brightness is NOT sent as DP22 when HSV is set."""
+    async def test_hsv_with_brightness_sends_both(self, mock_tuya_device, mock_entry_data):
+        """Test that both DP22 and HSV are sent when brightness + HSV are set."""
         coordinator = _make_coordinator(mock_tuya_device, mock_entry_data)
 
         await coordinator.async_turn_on_with_attrs(
@@ -220,8 +220,8 @@ class TestAsyncTurnOnWithAttrs:
         dps = mock_tuya_device.set_multiple_values.call_args[0][0]
         assert dps[str(DP_MODE)] == "colour"
         assert dps[str(DP_COLOR_HSV)] == "007803e803e8"
-        # DP_BRIGHTNESS should NOT be set when HSV is active
-        assert str(DP_BRIGHTNESS) not in dps
+        # DP_BRIGHTNESS is sent alongside HSV — DP22 controls physical brightness
+        assert dps[str(DP_BRIGHTNESS)] == 500
 
 
 class TestAsyncTurnOff:

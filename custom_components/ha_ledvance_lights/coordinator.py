@@ -108,9 +108,10 @@ class LedvanceDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             dps[str(DP_MODE)] = "white"
             dps[str(DP_COLOR_TEMP)] = color_temp
 
-        if brightness is not None and hsv_hex is None:
-            # Only set DP_BRIGHTNESS for white/CT mode.
-            # In colour mode, brightness is encoded inside the HSV hex string.
+        if brightness is not None:
+            # DP22 controls actual LED brightness in all modes.
+            # In colour mode, the V component of HSV hex controls the colour
+            # value, but DP22 is still needed for physical brightness.
             dps[str(DP_BRIGHTNESS)] = brightness
 
         await self.hass.async_add_executor_job(self.device.set_multiple_values, dps)

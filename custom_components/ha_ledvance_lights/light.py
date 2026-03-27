@@ -87,7 +87,10 @@ class LedvanceLight(CoordinatorEntity[LedvanceDataUpdateCoordinator], LightEntit
 
     @property
     def brightness(self) -> int | None:
-        """Return the brightness (0-255)."""
+        """Return the brightness (0-255).
+
+        DP22 controls physical LED brightness in all modes (white and colour).
+        """
         if self.coordinator.data is None:
             return None
         value = self.coordinator.data.get(str(DP_BRIGHTNESS))
