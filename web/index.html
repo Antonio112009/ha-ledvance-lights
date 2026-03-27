@@ -167,6 +167,7 @@
         }
         .scan-result:hover { border-color: var(--success); }
         .scan-result .ip { color: var(--success); font-weight: 600; }
+        .scan-result .mac { color: #b57edc; font-size: 0.75rem; font-family: 'SF Mono', 'Fira Code', monospace; }
         .scan-result .id { color: var(--muted); font-size: 0.75rem; }
         .color-preview {
             width: 40px;
@@ -520,10 +521,13 @@
 
                 const idText = d.id ? d.id : '<em style="color:var(--muted)">needs credentials</em>';
                 const productKey = d.product_key ? ` · ${d.product_key}` : '';
+                const macText = d.mac
+                    ? `<span class="mac">${d.mac}</span>`
+                    : (d.cross_vlan ? '<span class="mac" title="MAC unavailable for cross-VLAN devices">cross-VLAN</span>' : '');
 
                 return `<div class="scan-result" onclick="useDevice('${d.ip}', '${d.id || ''}', '${ver || '3.3'}')">
                     <div><span class="ip">${d.ip}</span>${badges}</div>
-                    <div class="id">${idText}${productKey}</div>
+                    <div class="id">${macText}${macText && (idText || productKey) ? ' · ' : ''}${idText}${productKey}</div>
                 </div>`;
             }).join('');
         }

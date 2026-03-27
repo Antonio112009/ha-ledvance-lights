@@ -6,9 +6,12 @@ import hashlib
 import ipaddress
 import json
 import logging
+import platform
+import re
 import select
 import socket
 import struct
+import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .crypto import aes_ecb_decrypt, aes_gcm_decrypt
@@ -221,48 +224,72 @@ def _is_tuya_response(data: bytes) -> bool:
     return data[:4] in (PREFIX_55AA_BIN, PREFIX_6699_BIN)
 
 
-def _extract_version_from_payload(data: bytes) -> str:
-    """Try to extract the protocol version string from a raw Tuya response.
+def _detect_version_from_response(data: bytes) -> str:
+    """Detect protocol version from a raw Tuya TCP response.
 
-    In v3.3 responses the payload area starts with the version string "3.3"
-    followed by 12 zero-bytes, then the encrypted payload. We look for this
-    pattern after the 16-byte 55AA header.
+    Uses structural clues since the payload itself is encrypted:
+    - 0x6699 prefix → v3.5
+    - 0x55AA with payload_len indicating HMAC footer (36-byte) → v3.4
+    - 0x55AA with payload_len indicating CRC footer (8-byte) → v3.3
+    - Version string "3.x" at payload offset → explicit version
     """
-    # 55AA header is 16 bytes; payload starts right after
-    if len(data) < 20:
+    if len(data) < 16:
         return ""
-    payload_start = 16
-    ver_bytes = data[payload_start : payload_start + 3]
-    if ver_bytes in (b"3.3", b"3.4", b"3.5"):
-        return ver_bytes.decode()
+
+    # v3.5 uses a completely different prefix
+    if data[:4] == PREFIX_6699_BIN:
+        return "3.5"
+
+    if data[:4] != PREFIX_55AA_BIN:
+        return ""
+
+    # Check for explicit version string at payload start (offset 16)
+    if len(data) > 19:
+        ver_bytes = data[16:19]
+        if ver_bytes in (b"3.3", b"3.4", b"3.5"):
+            return ver_bytes.decode()
+
+    # Infer from footer size: parse the header to get payload_len,
+    # then check if total message matches CRC footer (v3.3) or HMAC (v3.4)
+    try:
+        _, _, _, payload_len, header_size = parse_header(data)
+        total_len = header_size + payload_len
+        actual_len = len(data)
+        suffix_55aa = struct.pack(">I", 0x0000AA55)
+
+        if actual_len == total_len and data[-4:] == suffix_55aa:
+            # CRC footer (v3.3): 4-byte CRC + 4-byte suffix = 8
+            encrypted_len = payload_len - 8
+            if encrypted_len > 0 and encrypted_len % 16 == 0:
+                return "3.3"
+            # HMAC footer (v3.4): 32-byte HMAC + 4-byte suffix = 36
+            if payload_len - 36 > 0:
+                return "3.4"
+    except (DecodeError, struct.error):
+        pass
+
     return ""
 
 
 def _extract_info_from_response(data: bytes) -> dict:
-    """Try to extract device info from a raw Tuya TCP response.
+    """Extract device info from a raw Tuya TCP response.
 
     Returns a dict with whatever we can determine: version, device_id.
     """
     info: dict[str, str] = {}
 
-    # Detect protocol by prefix
-    if data[:4] == PREFIX_6699_BIN:
-        info["version"] = "3.5"
-    elif data[:4] == PREFIX_55AA_BIN:
-        ver = _extract_version_from_payload(data)
-        if ver:
-            info["version"] = ver
+    # Detect version from response structure
+    ver = _detect_version_from_response(data)
+    if ver:
+        info["version"] = ver
 
-    # Try to find a JSON payload with gwId/devId (only works for unencrypted
-    # or v3.1 plaintext responses). Won't work for encrypted payloads, but
-    # it's worth trying since some devices respond with error JSONs in plaintext.
+    # Try to find a JSON payload with gwId/devId (works for unencrypted
+    # or plaintext error responses)
     try:
         text = data.decode("latin-1")
-        # Look for JSON-like patterns containing gwId or devId
         for marker in ('"gwId"', '"devId"'):
             idx = text.find(marker)
             if idx >= 0:
-                # Find surrounding braces
                 start = text.rfind("{", 0, idx)
                 end = text.find("}", idx)
                 if start >= 0 and end >= 0:
@@ -400,6 +427,190 @@ def scan_network(network: str, timeout: float = 30.0) -> list[dict]:
 
 
 # ─────────────────────────────────────────────
+#  MAC address resolution via ARP table
+# ─────────────────────────────────────────────
+
+# MAC address regex: xx:xx:xx:xx:xx:xx or xx-xx-xx-xx-xx-xx
+_MAC_RE = re.compile(r"([0-9a-fA-F]{1,2}[:\-]){5}[0-9a-fA-F]{1,2}")
+
+
+def _get_arp_table() -> dict[str, str]:
+    """Read the system ARP table and return a mapping of IP → MAC address.
+
+    Works on macOS, Linux, and Windows.
+    """
+    arp_map: dict[str, str] = {}
+    system = platform.system()
+
+    try:
+        if system == "Linux":
+            # /proc/net/arp is the fastest source on Linux
+            try:
+                with open("/proc/net/arp") as f:
+                    for line in f.readlines()[1:]:  # skip header
+                        parts = line.split()
+                        if len(parts) >= 4 and parts[3] != "00:00:00:00:00:00":
+                            arp_map[parts[0]] = parts[3].lower()
+            except FileNotFoundError:
+                # Fallback to arp command
+                result = subprocess.run(
+                    ["arp", "-n"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                for line in result.stdout.splitlines():
+                    parts = line.split()
+                    if len(parts) >= 3:
+                        mac_match = _MAC_RE.search(line)
+                        if mac_match:
+                            ip = parts[0]
+                            mac = mac_match.group().lower().replace("-", ":")
+                            if mac != "00:00:00:00:00:00":
+                                arp_map[ip] = mac
+        else:
+            # macOS / Windows: use `arp -a`
+            result = subprocess.run(
+                ["arp", "-a"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            for line in result.stdout.splitlines():
+                mac_match = _MAC_RE.search(line)
+                if not mac_match:
+                    continue
+                mac = mac_match.group().lower().replace("-", ":")
+                if mac == "ff:ff:ff:ff:ff:ff" or mac == "00:00:00:00:00:00":
+                    continue
+                # Extract IP: look for (x.x.x.x) or just x.x.x.x
+                ip_match = re.search(r"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})", line)
+                if ip_match:
+                    arp_map[ip_match.group(1)] = mac
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+        _LOGGER.debug("Failed to read ARP table: %s", exc)
+
+    return arp_map
+
+
+def _normalize_mac(mac: str) -> str:
+    """Normalize a MAC address to colon-separated lowercase with zero-padding.
+
+    e.g., "a:b:c:d:e:f" → "0a:0b:0c:0d:0e:0f"
+    """
+    parts = mac.replace("-", ":").split(":")
+    return ":".join(p.zfill(2) for p in parts).lower()
+
+
+def resolve_mac_addresses(devices: list[dict]) -> list[dict]:
+    """Enrich a list of device dicts with MAC addresses from the ARP table.
+
+    For cross-VLAN devices (not in the local ARP table), the MAC field
+    will be empty since ARP is a Layer 2 protocol and can't resolve
+    addresses across routed networks.
+    """
+    arp_table = _get_arp_table()
+
+    # Determine local subnets so we can tell cross-VLAN apart
+    local_subnets = _get_local_subnets()
+
+    for dev in devices:
+        ip = dev.get("ip", "")
+        mac = arp_table.get(ip, "")
+        dev["mac"] = _normalize_mac(mac) if mac else ""
+        # Mark cross-VLAN devices so the UI can explain why MAC is missing
+        if not mac and ip:
+            is_local = any(_ip_in_subnet(ip, net, mask) for net, mask in local_subnets)
+            dev["cross_vlan"] = not is_local
+
+    return devices
+
+
+def _get_local_subnets() -> list[tuple[str, str]]:
+    """Get local network interfaces and their subnets.
+
+    Returns a list of (network_address, netmask) tuples.
+    """
+    subnets: list[tuple[str, str]] = []
+    try:
+        import array
+        import fcntl
+
+        # Linux: use ioctl to get interface addresses
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # Get list of interfaces
+        max_possible = 128
+        buf = array.array("B", b"\0" * max_possible * 40)
+        # SIOCGIFCONF
+        result = fcntl.ioctl(
+            sock.fileno(),
+            0x8912,
+            struct.pack("iL", max_possible * 40, buf.buffer_info()[0]),
+        )
+        out_bytes = struct.unpack("iL", result)[0]
+        data = buf.tobytes()[:out_bytes]
+        offset = 0
+        while offset < len(data):
+            name = data[offset : offset + 16].split(b"\0", 1)[0]
+            ip_bytes = data[offset + 20 : offset + 24]
+            ip_addr = socket.inet_ntoa(ip_bytes)
+            # Get netmask via SIOCGIFNETMASK
+            try:
+                mask_result = fcntl.ioctl(
+                    sock.fileno(),
+                    0x891B,
+                    struct.pack("256s", name),
+                )
+                mask = socket.inet_ntoa(mask_result[20:24])
+                subnets.append((ip_addr, mask))
+            except OSError:
+                pass
+            offset += 40
+        sock.close()
+    except (ImportError, OSError):
+        # macOS / fallback: parse ifconfig output
+        try:
+            result = subprocess.run(
+                ["ifconfig"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            current_ip = ""
+            for line in result.stdout.splitlines():
+                inet_match = re.search(
+                    r"inet (\d+\.\d+\.\d+\.\d+).*?netmask\s+(0x[0-9a-f]+|\d+\.\d+\.\d+\.\d+)",
+                    line,
+                )
+                if inet_match:
+                    current_ip = inet_match.group(1)
+                    mask_str = inet_match.group(2)
+                    if mask_str.startswith("0x"):
+                        # macOS hex netmask: 0xffffff00
+                        mask_int = int(mask_str, 16)
+                        mask = socket.inet_ntoa(struct.pack(">I", mask_int))
+                    else:
+                        mask = mask_str
+                    if current_ip != "127.0.0.1":
+                        subnets.append((current_ip, mask))
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            pass
+
+    return subnets
+
+
+def _ip_in_subnet(ip: str, network_ip: str, netmask: str) -> bool:
+    """Check if an IP address is within a subnet."""
+    try:
+        ip_int = struct.unpack(">I", socket.inet_aton(ip))[0]
+        net_int = struct.unpack(">I", socket.inet_aton(network_ip))[0]
+        mask_int = struct.unpack(">I", socket.inet_aton(netmask))[0]
+        return (ip_int & mask_int) == (net_int & mask_int)
+    except (OSError, struct.error):
+        return False
+
+
+# ─────────────────────────────────────────────
 #  Combined scan: UDP broadcast + optional TCP probe
 # ─────────────────────────────────────────────
 
@@ -487,4 +698,39 @@ def scan_devices(
                 # Use IP as key since we don't have device ID
                 devices[f"tcp_{dev['ip']}"] = dev
 
-    return list(devices.values())
+    result = list(devices.values())
+
+    # Ping discovered IPs to populate the ARP table, then resolve MACs
+    _ping_ips([d["ip"] for d in result])
+    resolve_mac_addresses(result)
+
+    return result
+
+
+def _ping_ips(ips: list[str]) -> None:
+    """Send a single ping to each IP to populate the ARP table.
+
+    Uses concurrent execution for speed. Failures are silently ignored
+    since the only purpose is to populate the ARP cache.
+    """
+    if not ips:
+        return
+
+    system = platform.system()
+    count_flag = "-c" if system != "Windows" else "-n"
+    timeout_flag = "-W" if system == "Linux" else "-t" if system == "Windows" else "-W"
+    # macOS -W uses milliseconds, Linux uses seconds
+    timeout_val = "500" if system == "Darwin" else "1"
+
+    def _ping_one(ip: str) -> None:
+        import contextlib
+
+        with contextlib.suppress(subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            subprocess.run(
+                ["ping", count_flag, "1", timeout_flag, timeout_val, ip],
+                capture_output=True,
+                timeout=2,
+            )
+
+    with ThreadPoolExecutor(max_workers=min(20, len(ips))) as executor:
+        list(executor.map(_ping_one, ips))
