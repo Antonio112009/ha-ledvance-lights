@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import timedelta
 from typing import Any
@@ -28,6 +29,10 @@ from .tuya import TuyaDevice
 
 _LOGGER = logging.getLogger(__name__)
 
+# Debounce delay: wait this long after the last change before sending to the
+# device.  Rapid slider drags will coalesce into a single command.
+_DEBOUNCE_SECONDS = 0.3
+
 type LedvanceConfigEntry = ConfigEntry[LedvanceDataUpdateCoordinator]
 
 
@@ -53,6 +58,11 @@ class LedvanceDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             version=entry.data.get(CONF_PROTOCOL_VERSION, "3.3"),
         )
 
+        # Debounce state: accumulates DPs from rapid calls, sends once settled.
+        self._pending_dps: dict[str, Any] = {}
+        self._debounce_task: asyncio.Task[None] | None = None
+        self._command_lock = asyncio.Lock()
+
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch device status."""
         result = await self.hass.async_add_executor_job(self.device.status)
@@ -65,23 +75,70 @@ class LedvanceDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _apply_optimistic_update(self, dps: dict[str, Any]) -> None:
         """Apply DPs to local data immediately so the UI reflects changes instantly.
 
-        This prevents the brief flicker to 0 / stale values that occurs when the
-        device hasn't finished applying the command before the next poll.
+        Called BEFORE sending the command to the device so that any subsequent
+        calls (e.g. brightness change right after a mode switch) see the
+        intended state, avoiding race conditions.
         """
         if not hasattr(self, "data") or self.data is None:
             return
         updated = {**self.data, **dps}
         self.async_set_updated_data(updated)
 
+    async def _async_send_debounced(self) -> None:
+        """Wait for the debounce period, then send accumulated DPs to the device.
+
+        If new DPs arrive during the wait, the timer resets and the new values
+        are merged in.  Only the final merged set is sent to the device.
+        """
+        try:
+            await asyncio.sleep(_DEBOUNCE_SECONDS)
+        except asyncio.CancelledError:
+            # A newer call cancelled us — the new task will send instead.
+            return
+
+        # Grab the accumulated DPs and clear.
+        async with self._command_lock:
+            dps = self._pending_dps.copy()
+            self._pending_dps.clear()
+            self._debounce_task = None
+
+        if not dps:
+            return
+
+        try:
+            await self.hass.async_add_executor_job(self.device.set_multiple_values, dps)
+        except Exception:
+            _LOGGER.exception("Failed to send DPs to device: %s", dps)
+
+    def _schedule_debounced_send(self, dps: dict[str, Any]) -> None:
+        """Merge *dps* into the pending set and (re)start the debounce timer.
+
+        Optimistic update is applied immediately so the UI stays responsive.
+        The actual device command is delayed until no new changes arrive for
+        ``_DEBOUNCE_SECONDS``.
+        """
+        # Merge into pending — later values overwrite earlier ones.
+        self._pending_dps.update(dps)
+
+        # Optimistic: update local state now.
+        self._apply_optimistic_update(dps)
+
+        # Cancel previous debounce timer if still waiting.
+        if self._debounce_task is not None and not self._debounce_task.done():
+            self._debounce_task.cancel()
+
+        # Start a new debounce timer.
+        self._debounce_task = asyncio.ensure_future(self._async_send_debounced())
+
     async def async_turn_on(self) -> None:
-        """Turn the light on."""
-        await self.hass.async_add_executor_job(self.device.set_status, True, DP_POWER)
+        """Turn the light on (immediate — not debounced)."""
         self._apply_optimistic_update({str(DP_POWER): True})
+        await self.hass.async_add_executor_job(self.device.set_status, True, DP_POWER)
 
     async def async_turn_off(self) -> None:
-        """Turn the light off."""
-        await self.hass.async_add_executor_job(self.device.set_status, False, DP_POWER)
+        """Turn the light off (immediate — not debounced)."""
         self._apply_optimistic_update({str(DP_POWER): False})
+        await self.hass.async_add_executor_job(self.device.set_status, False, DP_POWER)
 
     async def async_turn_on_with_attrs(
         self,
@@ -90,12 +147,12 @@ class LedvanceDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         hsv_hex: str | None = None,
         scene_num: int | None = None,
     ) -> None:
-        """Turn on and set attributes in a single command.
+        """Turn on and set attributes with debouncing.
 
-        Batches all DP changes into one set_multiple_values call to avoid
-        multiple TCP connections.  After sending, applies an optimistic update
-        so the UI reflects the new state immediately without waiting for the
-        next poll cycle.
+        Rapid sequential calls (e.g. dragging a brightness slider) are merged
+        into a single device command.  The optimistic update is applied
+        immediately so the UI stays responsive, but the actual TCP command is
+        delayed by ``_DEBOUNCE_SECONDS`` to coalesce rapid changes.
         """
         dps: dict[str, Any] = {str(DP_POWER): True}
 
@@ -109,10 +166,6 @@ class LedvanceDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             dps[str(DP_COLOR_TEMP)] = color_temp
 
         if brightness is not None:
-            # DP22 controls actual LED brightness in all modes.
-            # In colour mode, the V component of HSV hex controls the colour
-            # value, but DP22 is still needed for physical brightness.
             dps[str(DP_BRIGHTNESS)] = brightness
 
-        await self.hass.async_add_executor_job(self.device.set_multiple_values, dps)
-        self._apply_optimistic_update(dps)
+        self._schedule_debounced_send(dps)

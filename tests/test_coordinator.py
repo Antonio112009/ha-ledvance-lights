@@ -1,11 +1,12 @@
 """Tests for the Ledvance Lights coordinator.
 
 Tests the coordinator logic by mocking the TuyaDevice and HA framework,
-focusing on data processing and DP command construction.
+focusing on data processing, DP command construction, and debounce behaviour.
 """
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -63,6 +64,12 @@ def _make_coordinator(mock_tuya_device, mock_entry_data):
         return coordinator
 
 
+async def _flush_debounce(coordinator) -> None:
+    """Wait for the debounce timer to fire and the command to be sent."""
+    if coordinator._debounce_task is not None:
+        await coordinator._debounce_task
+
+
 class TestAsyncUpdateData:
     """Tests for the _async_update_data method."""
 
@@ -89,7 +96,6 @@ class TestAsyncUpdateData:
         mock_tuya_device.status.return_value = None
         coordinator = _make_coordinator(mock_tuya_device, mock_entry_data)
 
-        # Import the actual exception to check
         from homeassistant.helpers.update_coordinator import UpdateFailed
 
         with pytest.raises(UpdateFailed):
@@ -108,14 +114,15 @@ class TestAsyncUpdateData:
 
 
 class TestAsyncTurnOnWithAttrs:
-    """Tests for the async_turn_on_with_attrs method."""
+    """Tests for the async_turn_on_with_attrs method (debounced)."""
 
     @pytest.mark.asyncio
     async def test_brightness_only(self, mock_tuya_device, mock_entry_data):
-        """Test setting brightness only."""
+        """Test setting brightness only sends correct DPs after debounce."""
         coordinator = _make_coordinator(mock_tuya_device, mock_entry_data)
 
         await coordinator.async_turn_on_with_attrs(brightness=500)
+        await _flush_debounce(coordinator)
 
         mock_tuya_device.set_multiple_values.assert_called_once()
         dps = mock_tuya_device.set_multiple_values.call_args[0][0]
@@ -129,6 +136,7 @@ class TestAsyncTurnOnWithAttrs:
         coordinator = _make_coordinator(mock_tuya_device, mock_entry_data)
 
         await coordinator.async_turn_on_with_attrs(color_temp=750)
+        await _flush_debounce(coordinator)
 
         dps = mock_tuya_device.set_multiple_values.call_args[0][0]
         assert dps[str(DP_POWER)] is True
@@ -141,6 +149,7 @@ class TestAsyncTurnOnWithAttrs:
         coordinator = _make_coordinator(mock_tuya_device, mock_entry_data)
 
         await coordinator.async_turn_on_with_attrs(color_temp=750, brightness=300)
+        await _flush_debounce(coordinator)
 
         dps = mock_tuya_device.set_multiple_values.call_args[0][0]
         assert dps[str(DP_POWER)] is True
@@ -154,6 +163,7 @@ class TestAsyncTurnOnWithAttrs:
         coordinator = _make_coordinator(mock_tuya_device, mock_entry_data)
 
         await coordinator.async_turn_on_with_attrs(hsv_hex="007803e803e8")
+        await _flush_debounce(coordinator)
 
         dps = mock_tuya_device.set_multiple_values.call_args[0][0]
         assert dps[str(DP_POWER)] is True
@@ -166,11 +176,11 @@ class TestAsyncTurnOnWithAttrs:
         coordinator = _make_coordinator(mock_tuya_device, mock_entry_data)
 
         await coordinator.async_turn_on_with_attrs(scene_num=2)
+        await _flush_debounce(coordinator)
 
         dps = mock_tuya_device.set_multiple_values.call_args[0][0]
         assert dps[str(DP_POWER)] is True
         assert dps[str(DP_SCENE_NUM)] == 2
-        # Scene should not set mode or color
         assert str(DP_MODE) not in dps
         assert str(DP_COLOR_HSV) not in dps
 
@@ -180,6 +190,7 @@ class TestAsyncTurnOnWithAttrs:
         coordinator = _make_coordinator(mock_tuya_device, mock_entry_data)
 
         await coordinator.async_turn_on_with_attrs(scene_num=3, hsv_hex="007803e803e8")
+        await _flush_debounce(coordinator)
 
         dps = mock_tuya_device.set_multiple_values.call_args[0][0]
         assert dps[str(DP_SCENE_NUM)] == 3
@@ -192,21 +203,30 @@ class TestAsyncTurnOnWithAttrs:
         coordinator = _make_coordinator(mock_tuya_device, mock_entry_data)
 
         await coordinator.async_turn_on_with_attrs()
+        await _flush_debounce(coordinator)
 
         dps = mock_tuya_device.set_multiple_values.call_args[0][0]
         assert dps == {str(DP_POWER): True}
 
     @pytest.mark.asyncio
-    async def test_optimistic_update_after(self, mock_tuya_device, mock_entry_data):
-        """Test that optimistic update is applied after setting values."""
+    async def test_optimistic_update_immediate(self, mock_tuya_device, mock_entry_data):
+        """Test that optimistic update is applied immediately (before debounce)."""
         coordinator = _make_coordinator(mock_tuya_device, mock_entry_data)
 
         await coordinator.async_turn_on_with_attrs(brightness=500)
 
+        # Optimistic update should fire immediately, not after debounce.
         coordinator.async_set_updated_data.assert_called_once()
         updated = coordinator.async_set_updated_data.call_args[0][0]
         assert updated[str(DP_POWER)] is True
         assert updated[str(DP_BRIGHTNESS)] == 500
+
+        # Device command hasn't been sent yet (still debouncing).
+        mock_tuya_device.set_multiple_values.assert_not_called()
+
+        # After debounce, device gets the command.
+        await _flush_debounce(coordinator)
+        mock_tuya_device.set_multiple_values.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_hsv_with_brightness_sends_both(self, mock_tuya_device, mock_entry_data):
@@ -214,12 +234,67 @@ class TestAsyncTurnOnWithAttrs:
         coordinator = _make_coordinator(mock_tuya_device, mock_entry_data)
 
         await coordinator.async_turn_on_with_attrs(hsv_hex="007803e803e8", brightness=500)
+        await _flush_debounce(coordinator)
 
         dps = mock_tuya_device.set_multiple_values.call_args[0][0]
         assert dps[str(DP_MODE)] == "colour"
         assert dps[str(DP_COLOR_HSV)] == "007803e803e8"
-        # DP_BRIGHTNESS is sent alongside HSV — DP22 controls physical brightness
         assert dps[str(DP_BRIGHTNESS)] == 500
+
+
+class TestDebounceCoalescing:
+    """Tests that rapid calls are coalesced into a single device command."""
+
+    @pytest.mark.asyncio
+    async def test_rapid_brightness_changes_coalesce(self, mock_tuya_device, mock_entry_data):
+        """Test that multiple rapid brightness changes send only the last value."""
+        coordinator = _make_coordinator(mock_tuya_device, mock_entry_data)
+
+        # Simulate rapid slider drags — no await between calls.
+        await coordinator.async_turn_on_with_attrs(brightness=100)
+        await coordinator.async_turn_on_with_attrs(brightness=300)
+        await coordinator.async_turn_on_with_attrs(brightness=800)
+
+        # Only the last debounce task should fire.
+        await _flush_debounce(coordinator)
+
+        # Device should receive exactly ONE command with the final brightness.
+        mock_tuya_device.set_multiple_values.assert_called_once()
+        dps = mock_tuya_device.set_multiple_values.call_args[0][0]
+        assert dps[str(DP_BRIGHTNESS)] == 800
+
+    @pytest.mark.asyncio
+    async def test_mode_switch_then_brightness_coalesce(self, mock_tuya_device, mock_entry_data):
+        """Test that mode switch + brightness change merge into one command."""
+        coordinator = _make_coordinator(mock_tuya_device, mock_entry_data)
+
+        # Switch to colour mode, then immediately change brightness.
+        await coordinator.async_turn_on_with_attrs(hsv_hex="007803e803e8")
+        await coordinator.async_turn_on_with_attrs(brightness=600)
+
+        await _flush_debounce(coordinator)
+
+        # Single merged command should have both mode + brightness.
+        mock_tuya_device.set_multiple_values.assert_called_once()
+        dps = mock_tuya_device.set_multiple_values.call_args[0][0]
+        assert dps[str(DP_MODE)] == "colour"
+        assert dps[str(DP_COLOR_HSV)] == "007803e803e8"
+        assert dps[str(DP_BRIGHTNESS)] == 600
+
+    @pytest.mark.asyncio
+    async def test_optimistic_updates_applied_for_each_call(
+        self, mock_tuya_device, mock_entry_data
+    ):
+        """Test that optimistic updates fire for each call, not just the last."""
+        coordinator = _make_coordinator(mock_tuya_device, mock_entry_data)
+
+        await coordinator.async_turn_on_with_attrs(brightness=100)
+        await coordinator.async_turn_on_with_attrs(brightness=800)
+
+        # Two optimistic updates should have been applied.
+        assert coordinator.async_set_updated_data.call_count == 2
+
+        await _flush_debounce(coordinator)
 
 
 class TestAsyncTurnOff:
