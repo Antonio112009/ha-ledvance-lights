@@ -1,4 +1,4 @@
-"""DataUpdateCoordinator for Ledvance Smart+ WiFi."""
+"""DataUpdateCoordinator for Ledvance Lights."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import logging
 from datetime import timedelta
 from typing import Any
 
-import tinytuya
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
@@ -25,6 +24,7 @@ from .const import (
     DP_POWER,
     DP_SCENE_NUM,
 )
+from .tuya import TuyaDevice
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -32,7 +32,7 @@ type LedvanceConfigEntry = ConfigEntry[LedvanceDataUpdateCoordinator]
 
 
 class LedvanceDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
-    """Coordinator to poll Ledvance light status via TinyTuya."""
+    """Coordinator to poll Ledvance light status via local Tuya protocol."""
 
     config_entry: LedvanceConfigEntry
 
@@ -46,12 +46,12 @@ class LedvanceDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             config_entry=entry,
         )
 
-        self.device = tinytuya.BulbDevice(
+        self.device = TuyaDevice(
             dev_id=entry.data[CONF_DEVICE_ID],
             address=entry.data[CONF_IP_ADDRESS],
             local_key=entry.data[CONF_LOCAL_KEY],
+            version=entry.data.get(CONF_PROTOCOL_VERSION, "3.3"),
         )
-        self.device.set_version(float(entry.data[CONF_PROTOCOL_VERSION]))
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch device status."""

@@ -1,4 +1,4 @@
-"""Ledvance Smart+ WiFi integration for Home Assistant."""
+"""Ledvance Lights integration for Home Assistant."""
 
 from __future__ import annotations
 

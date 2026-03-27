@@ -20,12 +20,12 @@ Both files must stay in sync:
 
 | File | Field |
 |------|-------|
-| `custom_components/ledvance_wifi/manifest.json` | `"version": "X.Y.Z"` |
-| `custom_components/ledvance_wifi/const.py` | `VERSION = "X.Y.Z"` |
+| `custom_components/ha_ledvance_lights/manifest.json` | `"version": "X.Y.Z"` |
+| `custom_components/ha_ledvance_lights/const.py` | `VERSION = "X.Y.Z"` |
 
 ## Procedure
 
-1. **Read current version** from `custom_components/ledvance_wifi/manifest.json` (`"version"` field).
+1. **Read current version** from `custom_components/ha_ledvance_lights/manifest.json` (`"version"` field).
 2. **Parse** as `MAJOR.MINOR.PATCH` integers.
 3. **Apply bump** based on the requested type:
    - `major` → `MAJOR+1.0.0`
@@ -36,7 +36,7 @@ Both files must stay in sync:
    - In `const.py`: replace the `VERSION = "..."` value.
 5. **Stage the two changed files**:
    ```sh
-   git add custom_components/ledvance_wifi/manifest.json custom_components/ledvance_wifi/const.py
+   git add custom_components/ha_ledvance_lights/manifest.json custom_components/ha_ledvance_lights/const.py
    ```
 6. **Commit** with message:
    ```

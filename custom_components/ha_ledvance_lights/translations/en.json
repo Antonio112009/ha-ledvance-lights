@@ -1,0 +1,53 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Add Ledvance Light",
+        "description": "Choose how to add your device.",
+        "data": {
+          "action": "Setup method"
+        }
+      },
+      "scan": {
+        "title": "Select Device",
+        "description": "Select a discovered device from your network.",
+        "data": {
+          "device": "Device"
+        }
+      },
+      "credentials": {
+        "title": "Enter Local Key",
+        "description": "Device found at {ip} (ID: {device_id}). Enter the local key to connect.",
+        "data": {
+          "local_key": "Local key (API key)"
+        },
+        "data_description": {
+          "local_key": "Find via TinyTuya wizard or Tuya IoT Platform"
+        }
+      },
+      "manual": {
+        "title": "Manual Device Entry",
+        "description": "Enter your device details for local control.",
+        "data": {
+          "ip_address": "Local IP address",
+          "device_id": "Device ID",
+          "local_key": "Local key (API key)"
+        },
+        "data_description": {
+          "ip_address": "The local IP address of the device on your network",
+          "device_id": "Tuya device ID (find via TinyTuya wizard or Tuya IoT Platform)",
+          "local_key": "Local encryption key (find via TinyTuya wizard or Tuya IoT Platform)"
+        }
+      }
+    },
+    "error": {
+      "device_not_found": "No device found at this IP address. Check the IP and make sure the device is online.",
+      "invalid_key": "Invalid Device ID or Local Key. Please check your credentials.",
+      "cannot_connect": "Cannot connect to the device. Please try again.",
+      "no_devices_found": "No Tuya devices found on your network. Try manual entry instead."
+    },
+    "abort": {
+      "already_configured": "This device is already configured."
+    }
+  }
+}

@@ -1,4 +1,4 @@
-"""Light platform for Ledvance Smart+ WiFi."""
+"""Light platform for Ledvance Lights."""
 
 from __future__ import annotations
 
@@ -51,7 +51,7 @@ async def async_setup_entry(
 
 
 class LedvanceLight(CoordinatorEntity[LedvanceDataUpdateCoordinator], LightEntity):
-    """Representation of a Ledvance Smart+ WiFi light."""
+    """Representation of a Ledvance Lights light."""
 
     _attr_has_entity_name = True
     _attr_name = None
