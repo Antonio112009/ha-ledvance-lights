@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
@@ -184,7 +183,9 @@ async def async_get_config_entry_diagnostics(
 
     return {
         "integration_version": VERSION,
-        "config_entry": async_redact_data(dict(entry.data), TO_REDACT_CONFIG),
+        "config_entry": {
+            k: ("**REDACTED**" if k in TO_REDACT_CONFIG else v) for k, v in entry.data.items()
+        },
         "connection": {
             "ip_address": entry.data.get(CONF_IP_ADDRESS),
             "device_id": entry.data.get(CONF_DEVICE_ID),
