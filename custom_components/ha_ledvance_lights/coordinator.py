@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import timedelta
 from typing import Any
 
@@ -24,6 +25,8 @@ from .const import (
     DP_MODE,
     DP_POWER,
     DP_SCENE_NUM,
+    FAST_POLLING_INTERVAL,
+    MAX_FAST_POLL_DURATION,
 )
 from .tuya import TuyaDevice
 
@@ -63,14 +66,52 @@ class LedvanceDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._debounce_task: asyncio.Task[None] | None = None
         self._command_lock = asyncio.Lock()
 
+        # Adaptive polling: fast-poll when device is unavailable.
+        self._device_unavailable: bool = False
+        self._fast_poll_start: float | None = None
+
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch device status."""
         result = await self.hass.async_add_executor_job(self.device.status)
 
         if not result or "dps" not in result:
+            self._enter_fast_poll()
             raise UpdateFailed(f"Failed to get status from device: {result}")
 
+        if self._device_unavailable:
+            self._exit_fast_poll()
+
         return result["dps"]
+
+    def _enter_fast_poll(self) -> None:
+        """Switch to fast polling for quicker device recovery detection."""
+        now = time.monotonic()
+        if self._device_unavailable:
+            # Already fast-polling — check if cap exceeded.
+            if self._fast_poll_start and (now - self._fast_poll_start) >= MAX_FAST_POLL_DURATION:
+                _LOGGER.warning(
+                    "Device %s unavailable for %ds; reverting to normal polling",
+                    self.device.address,
+                    MAX_FAST_POLL_DURATION,
+                )
+                self.update_interval = timedelta(seconds=DEFAULT_POLLING_INTERVAL)
+            return
+
+        _LOGGER.debug(
+            "Device %s unavailable; fast polling at %ds",
+            self.device.address,
+            FAST_POLLING_INTERVAL,
+        )
+        self._device_unavailable = True
+        self._fast_poll_start = now
+        self.update_interval = timedelta(seconds=FAST_POLLING_INTERVAL)
+
+    def _exit_fast_poll(self) -> None:
+        """Device recovered — revert to normal polling interval."""
+        _LOGGER.info("Device %s recovered; resuming normal polling", self.device.address)
+        self._device_unavailable = False
+        self._fast_poll_start = None
+        self.update_interval = timedelta(seconds=DEFAULT_POLLING_INTERVAL)
 
     def _apply_optimistic_update(self, dps: dict[str, Any]) -> None:
         """Apply DPs to local data immediately so the UI reflects changes instantly.

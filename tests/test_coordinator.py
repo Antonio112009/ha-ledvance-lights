@@ -6,17 +6,21 @@ focusing on data processing, DP command construction, and debounce behaviour.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from custom_components.ha_ledvance_lights.const import (
+    DEFAULT_POLLING_INTERVAL,
     DP_BRIGHTNESS,
     DP_COLOR_HSV,
     DP_COLOR_TEMP,
     DP_MODE,
     DP_POWER,
     DP_SCENE_NUM,
+    FAST_POLLING_INTERVAL,
+    MAX_FAST_POLL_DURATION,
 )
 
 
@@ -348,3 +352,89 @@ class TestAsyncTurnOn:
         coordinator.async_set_updated_data.assert_called_once()
         updated = coordinator.async_set_updated_data.call_args[0][0]
         assert updated[str(DP_POWER)] is True
+
+
+class TestAdaptivePolling:
+    """Tests for the adaptive polling (fast-poll on failure, normal on recovery)."""
+
+    @pytest.mark.asyncio
+    async def test_enter_fast_poll_on_failure(self, mock_tuya_device, mock_entry_data):
+        """Test that a poll failure switches to fast polling."""
+        mock_tuya_device.status.return_value = None
+        coordinator = _make_coordinator(mock_tuya_device, mock_entry_data)
+        coordinator.update_interval = timedelta(seconds=DEFAULT_POLLING_INTERVAL)
+
+        from homeassistant.helpers.update_coordinator import UpdateFailed
+
+        with pytest.raises(UpdateFailed):
+            await coordinator._async_update_data()
+
+        assert coordinator._device_unavailable is True
+        assert coordinator._fast_poll_start is not None
+        assert coordinator.update_interval == timedelta(seconds=FAST_POLLING_INTERVAL)
+
+    @pytest.mark.asyncio
+    async def test_exit_fast_poll_on_recovery(self, mock_tuya_device, mock_entry_data):
+        """Test that a successful poll after failure reverts to normal polling."""
+        coordinator = _make_coordinator(mock_tuya_device, mock_entry_data)
+        coordinator.update_interval = timedelta(seconds=FAST_POLLING_INTERVAL)
+        coordinator._device_unavailable = True
+        coordinator._fast_poll_start = 0.0
+
+        result = await coordinator._async_update_data()
+
+        assert result is not None
+        assert coordinator._device_unavailable is False
+        assert coordinator._fast_poll_start is None
+        assert coordinator.update_interval == timedelta(seconds=DEFAULT_POLLING_INTERVAL)
+
+    @pytest.mark.asyncio
+    async def test_normal_poll_stays_normal(self, mock_tuya_device, mock_entry_data):
+        """Test that a successful poll when already healthy keeps normal interval."""
+        coordinator = _make_coordinator(mock_tuya_device, mock_entry_data)
+        coordinator.update_interval = timedelta(seconds=DEFAULT_POLLING_INTERVAL)
+
+        await coordinator._async_update_data()
+
+        assert coordinator._device_unavailable is False
+        assert coordinator.update_interval == timedelta(seconds=DEFAULT_POLLING_INTERVAL)
+
+    @pytest.mark.asyncio
+    async def test_fast_poll_cap_reverts_to_normal(self, mock_tuya_device, mock_entry_data):
+        """Test that fast-polling reverts to normal after MAX_FAST_POLL_DURATION."""
+        import time
+
+        mock_tuya_device.status.return_value = None
+        coordinator = _make_coordinator(mock_tuya_device, mock_entry_data)
+        coordinator.update_interval = timedelta(seconds=FAST_POLLING_INTERVAL)
+        coordinator._device_unavailable = True
+        # Pretend fast-polling started MAX_FAST_POLL_DURATION ago.
+        coordinator._fast_poll_start = time.monotonic() - MAX_FAST_POLL_DURATION - 1
+
+        from homeassistant.helpers.update_coordinator import UpdateFailed
+
+        with pytest.raises(UpdateFailed):
+            await coordinator._async_update_data()
+
+        # Should have reverted to normal polling due to cap.
+        assert coordinator.update_interval == timedelta(seconds=DEFAULT_POLLING_INTERVAL)
+        # Still marked unavailable — will be cleared when device responds.
+        assert coordinator._device_unavailable is True
+
+    @pytest.mark.asyncio
+    async def test_recovery_after_cap_expiry(self, mock_tuya_device, mock_entry_data):
+        """Test full recovery after fast-poll cap expired and device comes back."""
+        import time
+
+        coordinator = _make_coordinator(mock_tuya_device, mock_entry_data)
+        coordinator._device_unavailable = True
+        coordinator._fast_poll_start = time.monotonic() - MAX_FAST_POLL_DURATION - 100
+        coordinator.update_interval = timedelta(seconds=DEFAULT_POLLING_INTERVAL)
+
+        # Device comes back.
+        result = await coordinator._async_update_data()
+
+        assert result is not None
+        assert coordinator._device_unavailable is False
+        assert coordinator._fast_poll_start is None
+        assert coordinator.update_interval == timedelta(seconds=DEFAULT_POLLING_INTERVAL)

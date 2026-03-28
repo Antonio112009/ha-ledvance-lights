@@ -149,6 +149,15 @@ async def async_get_config_entry_diagnostics(
     if hasattr(coordinator, "last_exception") and coordinator.last_exception:
         health["last_error"] = str(coordinator.last_exception)
 
+    # Adaptive polling state
+    health["fast_polling"] = coordinator._device_unavailable
+    if coordinator._device_unavailable and coordinator._fast_poll_start is not None:
+        import time
+
+        health["fast_poll_elapsed_seconds"] = round(
+            time.monotonic() - coordinator._fast_poll_start, 1
+        )
+
     # Count known vs unknown DPs
     dp_summary: dict[str, Any] = {}
     if coordinator.data:

@@ -2,7 +2,7 @@
 
 from homeassistant.const import Platform
 
-VERSION = "1.3.8"
+VERSION = "1.4.0"
 
 DOMAIN = "ha_ledvance_lights"
 
@@ -22,6 +22,8 @@ ERR_KEY_OR_VER = "914"
 
 # Polling interval (seconds)
 DEFAULT_POLLING_INTERVAL = 30
+FAST_POLLING_INTERVAL = 5  # used when device is unavailable for quicker recovery
+MAX_FAST_POLL_DURATION = 300  # seconds (5 min) cap on fast polling
 
 # Tuya DP mappings for Ledvance Lights (Type B)
 DP_POWER = 20
