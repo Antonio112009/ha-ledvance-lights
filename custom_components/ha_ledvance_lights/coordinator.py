@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from datetime import timedelta
@@ -64,6 +65,7 @@ class LedvanceDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Debounce state: accumulates DPs from rapid calls, sends once settled.
         self._pending_dps: dict[str, Any] = {}
         self._debounce_task: asyncio.Task[None] | None = None
+        self._debounce_generation: int = 0
         self._command_lock = asyncio.Lock()
 
         # Adaptive polling: fast-poll when device is unavailable.
@@ -83,6 +85,18 @@ class LedvanceDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         return result["dps"]
 
+    @property
+    def device_available(self) -> bool:
+        """Return True if the last poll succeeded (i.e. device is reachable)."""
+        return not self._device_unavailable
+
+    @property
+    def fast_poll_elapsed_seconds(self) -> float | None:
+        """Return seconds elapsed in the current fast-poll window, if active."""
+        if not self._device_unavailable or self._fast_poll_start is None:
+            return None
+        return round(time.monotonic() - self._fast_poll_start, 1)
+
     def _enter_fast_poll(self) -> None:
         """Switch to fast polling for quicker device recovery detection."""
         now = time.monotonic()
@@ -95,6 +109,10 @@ class LedvanceDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     MAX_FAST_POLL_DURATION,
                 )
                 self.update_interval = timedelta(seconds=DEFAULT_POLLING_INTERVAL)
+                # Clear the timer so we don't repeatedly log/re-assign on every
+                # subsequent failed poll. ``_device_unavailable`` stays True so
+                # we don't re-enter fast-poll until a successful poll resets it.
+                self._fast_poll_start = None
             return
 
         _LOGGER.debug(
@@ -125,11 +143,15 @@ class LedvanceDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         updated = {**self.data, **dps}
         self.async_set_updated_data(updated)
 
-    async def _async_send_debounced(self) -> None:
+    async def _async_send_debounced(self, generation: int) -> None:
         """Wait for the debounce period, then send accumulated DPs to the device.
 
         If new DPs arrive during the wait, the timer resets and the new values
         are merged in.  Only the final merged set is sent to the device.
+
+        ``generation`` is captured at scheduling time so that, even if this
+        task wins a race against ``cancel()``, it can detect that a newer
+        scheduling has superseded it and bail out without sending.
         """
         try:
             await asyncio.sleep(_DEBOUNCE_SECONDS)
@@ -137,8 +159,13 @@ class LedvanceDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # A newer call cancelled us — the new task will send instead.
             return
 
-        # Grab the accumulated DPs and clear.
+        # Grab the accumulated DPs and clear, while holding the lock so a
+        # concurrent _schedule_debounced_send cannot interleave between the
+        # generation check and the snapshot.
         async with self._command_lock:
+            if generation != self._debounce_generation:
+                # Superseded by a newer scheduling that won the cancel race.
+                return
             dps = self._pending_dps.copy()
             self._pending_dps.clear()
             self._debounce_task = None
@@ -150,6 +177,15 @@ class LedvanceDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             await self.hass.async_add_executor_job(self.device.set_multiple_values, dps)
         except Exception:
             _LOGGER.exception("Failed to send DPs to device: %s", dps)
+            # Schedule a refresh so the UI reconciles with actual device state
+            # rather than keeping the (possibly wrong) optimistic state.
+            await self.async_request_refresh()
+            return
+
+        # Schedule a background refresh to confirm the device accepted the
+        # change (it normally pushes new state, but a refresh guarantees the
+        # UI converges even if the optimistic guess was wrong).
+        await self.async_request_refresh()
 
     def _schedule_debounced_send(self, dps: dict[str, Any]) -> None:
         """Merge *dps* into the pending set and (re)start the debounce timer.
@@ -164,12 +200,35 @@ class LedvanceDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Optimistic: update local state now.
         self._apply_optimistic_update(dps)
 
+        # Bump the generation so any in-flight task that wins the cancel race
+        # will detect it has been superseded.
+        self._debounce_generation += 1
+        my_generation = self._debounce_generation
+
         # Cancel previous debounce timer if still waiting.
         if self._debounce_task is not None and not self._debounce_task.done():
             self._debounce_task.cancel()
 
         # Start a new debounce timer.
-        self._debounce_task = asyncio.ensure_future(self._async_send_debounced())
+        self._debounce_task = asyncio.ensure_future(self._async_send_debounced(my_generation))
+
+    async def async_shutdown_device(self) -> None:
+        """Cancel any pending debounce work and close the device socket.
+
+        Called from ``async_unload_entry`` after platforms are unloaded so no
+        entity method can fire against a closed socket.
+        """
+        # Bump generation so any in-flight task bails out even if we lose the
+        # cancel race.
+        self._debounce_generation += 1
+        task = self._debounce_task
+        self._debounce_task = None
+        self._pending_dps.clear()
+        if task is not None and not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        await self.hass.async_add_executor_job(self.device.close)
 
     async def async_turn_on(self) -> None:
         """Turn the light on (immediate — not debounced)."""
