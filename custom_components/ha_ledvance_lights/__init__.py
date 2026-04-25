@@ -20,8 +20,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: LedvanceConfigEntry) -> 
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: LedvanceConfigEntry) -> bool:
-    """Unload a config entry and close the device socket."""
-    coordinator: LedvanceDataUpdateCoordinator = entry.runtime_data
-    coordinator.device._close()
+    """Unload a config entry and close the device socket.
 
-    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    Order matters: unload platforms first so no entity method can fire after
+    the socket is closed, then cancel any pending debounced command, then
+    close the socket off-loop.
+    """
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if unload_ok:
+        coordinator: LedvanceDataUpdateCoordinator = entry.runtime_data
+        await coordinator.async_shutdown_device()
+    return unload_ok

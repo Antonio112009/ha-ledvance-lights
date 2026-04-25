@@ -85,6 +85,12 @@ class LedvanceLight(CoordinatorEntity[LedvanceDataUpdateCoordinator], LightEntit
             return None
         return self.coordinator.data.get(str(DP_POWER))
 
+    def _is_scene_mode(self) -> bool:
+        """Return True if the device is currently running a scene/effect."""
+        if self.coordinator.data is None:
+            return False
+        return self.coordinator.data.get(str(DP_MODE)) == "scene"
+
     @property
     def brightness(self) -> int | None:
         """Return the brightness (0-255).
@@ -93,11 +99,14 @@ class LedvanceLight(CoordinatorEntity[LedvanceDataUpdateCoordinator], LightEntit
         In colour mode brightness is the V component of the HSV hex (DP24).
         Ledvance devices do NOT update DP22 when in colour mode, so reading
         DP22 would return a stale white-mode value.
+        In scene/effect mode brightness is device-controlled and unknown.
         """
         if self.coordinator.data is None:
             return None
 
         mode = self.coordinator.data.get(str(DP_MODE))
+        if mode == "scene":
+            return None
         if mode == "colour":
             hex_str = self.coordinator.data.get(str(DP_COLOR_HSV), "")
             if hex_str and len(hex_str) >= 12:
@@ -112,7 +121,13 @@ class LedvanceLight(CoordinatorEntity[LedvanceDataUpdateCoordinator], LightEntit
 
     @property
     def color_mode(self) -> ColorMode | None:
-        """Return the current color mode."""
+        """Return the current color mode.
+
+        In scene mode the device runs a built-in effect; HA still requires a
+        valid ``color_mode``, so we report the underlying CT mode but the
+        per-attribute properties (brightness, color_temp, hs_color) all return
+        None to avoid surfacing stale values.
+        """
         if self.coordinator.data is None:
             return None
         mode = self.coordinator.data.get(str(DP_MODE))
@@ -125,6 +140,8 @@ class LedvanceLight(CoordinatorEntity[LedvanceDataUpdateCoordinator], LightEntit
         """Return the color temperature in Kelvin."""
         if self.coordinator.data is None:
             return None
+        if self._is_scene_mode():
+            return None
         if self.color_mode != ColorMode.COLOR_TEMP:
             return None
         value = self.coordinator.data.get(str(DP_COLOR_TEMP))
@@ -136,6 +153,8 @@ class LedvanceLight(CoordinatorEntity[LedvanceDataUpdateCoordinator], LightEntit
     def hs_color(self) -> tuple[float, float] | None:
         """Return the hue/saturation color."""
         if self.coordinator.data is None:
+            return None
+        if self._is_scene_mode():
             return None
         if self.color_mode != ColorMode.HS:
             return None

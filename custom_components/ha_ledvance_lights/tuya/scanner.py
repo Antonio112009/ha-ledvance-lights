@@ -98,7 +98,7 @@ def _decode_broadcast(data: bytes, port: int) -> dict | None:
             return _decode_encrypted_ecb(data)
         if port == UDP_PORT_APP:
             return _decode_app_broadcast(data)
-    except (DecodeError, json.JSONDecodeError, ValueError, KeyError) as exc:
+    except (DecodeError, json.JSONDecodeError, ValueError, KeyError, UnicodeDecodeError) as exc:
         _LOGGER.debug("Failed to decode broadcast on port %d: %s", port, exc)
     return None
 
@@ -583,7 +583,7 @@ def _get_local_subnets() -> list[tuple[str, str]]:
                 pass
             offset += 40
         sock.close()
-    except (ImportError, OSError):
+    except (ImportError, OSError, struct.error):
         # macOS / fallback: parse ifconfig output
         try:
             result = subprocess.run(
@@ -834,9 +834,15 @@ def _ping_ips(ips: list[str]) -> None:
 
     system = platform.system()
     count_flag = "-c" if system != "Windows" else "-n"
-    timeout_flag = "-W" if system == "Linux" else "-t" if system == "Windows" else "-W"
-    # macOS -W uses milliseconds, Linux uses seconds
-    timeout_val = "500" if system == "Darwin" else "1"
+    # Windows uses -w (timeout in ms); -t means "ping forever" on Windows.
+    # Linux/macOS use -W (Linux: seconds, macOS: milliseconds).
+    timeout_flag = "-w" if system == "Windows" else "-W"
+    if system == "Darwin":
+        timeout_val = "500"   # macOS -W: milliseconds
+    elif system == "Windows":
+        timeout_val = "1000"  # Windows -w: milliseconds
+    else:
+        timeout_val = "1"     # Linux -W: seconds
 
     def _ping_one(ip: str) -> None:
         with contextlib.suppress(subprocess.TimeoutExpired, FileNotFoundError, OSError):

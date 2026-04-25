@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import voluptuous as vol
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from homeassistant.config_entries import SOURCE_DISCOVERY, ConfigFlow, ConfigFlowResult
 
 from .const import (
     CONF_DEVICE_ID,
@@ -52,8 +52,15 @@ def _test_connection(data: dict[str, Any]) -> ConnectionResult:
 
     Uses version detection to try the most likely version first, then falls
     back to trying all versions if needed.
+
+    A transport error (ERR_CONNECT/ERR_OFFLINE) on a single version is no
+    longer treated as fatal: we continue trying the remaining versions in
+    case the failure was a one-off socket hiccup, and only return
+    ``device_not_found`` if every version failed at the transport layer.
     """
     last_error: str | None = None
+    saw_transport_error = False
+    saw_other_error = False
     ip = data[CONF_IP_ADDRESS]
 
     # Detect version first — puts the right version at the front of the list
@@ -85,14 +92,23 @@ def _test_connection(data: dict[str, Any]) -> ConnectionResult:
         err_code = result.get("Err", "") if result else ""
 
         if err_code in (ERR_CONNECT, ERR_OFFLINE):
-            return ConnectionResult(success=False, error="device_not_found")
+            saw_transport_error = True
+            last_error = "device_not_found"
+            continue
 
         if err_code in (ERR_PAYLOAD, ERR_KEY_OR_VER):
+            saw_other_error = True
             last_error = "invalid_key"
             continue
 
+        saw_other_error = True
         last_error = "cannot_connect"
 
+    # If every attempt was a transport error, the device really is unreachable.
+    # If even one version produced a key/payload error, the device responded
+    # — surface that more specific error rather than "device_not_found".
+    if saw_transport_error and not saw_other_error:
+        return ConnectionResult(success=False, error="device_not_found")
     return ConnectionResult(success=False, error=last_error or "cannot_connect")
 
 
@@ -145,7 +161,7 @@ class LedvanceWifiConfigFlow(ConfigFlow, domain=DOMAIN):
             self.hass.async_create_task(
                 self.hass.config_entries.flow.async_init(
                     DOMAIN,
-                    context={"source": "discovery"},
+                    context={"source": SOURCE_DISCOVERY},
                     data={
                         CONF_IP_ADDRESS: dev["ip"],
                         CONF_DEVICE_ID: dev_id,

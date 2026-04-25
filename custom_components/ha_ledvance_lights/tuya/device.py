@@ -147,6 +147,10 @@ class TuyaDevice:
                 self._socket.close()
             self._socket = None
 
+    def close(self) -> None:
+        """Public alias for closing the socket (safe to call from executor)."""
+        self._close()
+
     def _negotiate_session_key(self) -> bool:
         """Three-step session key handshake for v3.4+."""
         try:
@@ -413,8 +417,15 @@ class TuyaDevice:
                     payload = payload[15:]
                 payload = aes_ecb_decrypt(self.local_key, payload)
 
-            # Strip version header if still present after decryption
-            if payload[:3] in (b"3.3", b"3.4", b"3.5"):
+            # Strip version header if still present after decryption.
+            # For v3.3 we already stripped pre-decrypt, so skip a second strip
+            # in that branch to avoid eating 15 bytes of legitimate JSON that
+            # happens to begin with "3.3...".
+            if (msg.prefix == PREFIX_6699 or self.version >= 3.4) and payload[:3] in (
+                b"3.3",
+                b"3.4",
+                b"3.5",
+            ):
                 payload = payload[15:]
 
             # Parse JSON

@@ -20,6 +20,8 @@ from .const import (
     DP_POWER,
     DP_SCENE,
     DP_SCENE_NUM,
+    TUYA_BRIGHTNESS_MAX,
+    TUYA_BRIGHTNESS_MIN,
     VERSION,
     parse_hsv_hex,
     tuya_brightness_to_ha,
@@ -66,7 +68,12 @@ def _format_device_status(dps: dict[str, Any] | None) -> dict[str, Any]:
         formatted["brightness"] = {
             "tuya_value": brightness,
             "ha_value": tuya_brightness_to_ha(brightness),
-            "percent": round((brightness - 10) / (1000 - 10) * 100, 1),
+            "percent": round(
+                (brightness - TUYA_BRIGHTNESS_MIN)
+                / (TUYA_BRIGHTNESS_MAX - TUYA_BRIGHTNESS_MIN)
+                * 100,
+                1,
+            ),
         }
 
     # Color temperature
@@ -149,13 +156,10 @@ async def async_get_config_entry_diagnostics(
         health["last_error"] = str(coordinator.last_exception)
 
     # Adaptive polling state
-    health["fast_polling"] = coordinator._device_unavailable
-    if coordinator._device_unavailable and coordinator._fast_poll_start is not None:
-        import time
-
-        health["fast_poll_elapsed_seconds"] = round(
-            time.monotonic() - coordinator._fast_poll_start, 1
-        )
+    health["fast_polling"] = not coordinator.device_available
+    elapsed = coordinator.fast_poll_elapsed_seconds
+    if elapsed is not None:
+        health["fast_poll_elapsed_seconds"] = elapsed
 
     # Count known vs unknown DPs
     dp_summary: dict[str, Any] = {}
