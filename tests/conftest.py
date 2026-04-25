@@ -153,6 +153,7 @@ def _setup_ha_stubs():
             "ConfigEntry": ConfigEntry,
             "ConfigFlow": ConfigFlow,
             "ConfigFlowResult": dict,
+            "SOURCE_DISCOVERY": "discovery",
         },
     )
     _create_mock_module(
