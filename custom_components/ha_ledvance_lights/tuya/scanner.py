@@ -838,11 +838,11 @@ def _ping_ips(ips: list[str]) -> None:
     # Linux/macOS use -W (Linux: seconds, macOS: milliseconds).
     timeout_flag = "-w" if system == "Windows" else "-W"
     if system == "Darwin":
-        timeout_val = "500"   # macOS -W: milliseconds
+        timeout_val = "500"  # macOS -W: milliseconds
     elif system == "Windows":
         timeout_val = "1000"  # Windows -w: milliseconds
     else:
-        timeout_val = "1"     # Linux -W: seconds
+        timeout_val = "1"  # Linux -W: seconds
 
     def _ping_one(ip: str) -> None:
         with contextlib.suppress(subprocess.TimeoutExpired, FileNotFoundError, OSError):
