@@ -210,9 +210,7 @@ class LedvanceDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._debounce_task.cancel()
 
         # Start a new debounce timer.
-        self._debounce_task = asyncio.ensure_future(
-            self._async_send_debounced(my_generation)
-        )
+        self._debounce_task = asyncio.ensure_future(self._async_send_debounced(my_generation))
 
     async def async_shutdown_device(self) -> None:
         """Cancel any pending debounce work and close the device socket.
