@@ -11,7 +11,10 @@ from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.helpers.update_coordinator import (
+    TimestampDataUpdateCoordinator,
+    UpdateFailed,
+)
 
 from .const import (
     CONF_DEVICE_ID,
@@ -40,8 +43,12 @@ _DEBOUNCE_SECONDS = 0.3
 type LedvanceConfigEntry = ConfigEntry[LedvanceDataUpdateCoordinator]
 
 
-class LedvanceDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
-    """Coordinator to poll Ledvance light status via local Tuya protocol."""
+class LedvanceDataUpdateCoordinator(TimestampDataUpdateCoordinator[dict[str, Any]]):
+    """Coordinator to poll Ledvance light status via local Tuya protocol.
+
+    Extends the Timestamp variant because diagnostics reads
+    ``last_update_success_time``, which the plain coordinator lacks.
+    """
 
     config_entry: LedvanceConfigEntry
 

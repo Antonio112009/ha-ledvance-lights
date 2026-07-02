@@ -39,7 +39,8 @@ def _make_coordinator(mock_tuya_device, mock_entry_data):
 
     with (
         patch(
-            "custom_components.ha_ledvance_lights.coordinator.DataUpdateCoordinator.__init__",
+            "custom_components.ha_ledvance_lights.coordinator."
+            "TimestampDataUpdateCoordinator.__init__",
             return_value=None,
         ),
         patch(
@@ -391,6 +392,25 @@ class TestSetPowerFailureHandling:
         await coordinator.async_turn_on()
 
         coordinator.async_request_refresh.assert_not_awaited()
+
+
+class TestCoordinatorBaseClass:
+    """Diagnostics depends on the Timestamp coordinator variant."""
+
+    def test_subclasses_timestamp_coordinator(self):
+        """Diagnostics reads ``last_update_success_time``, which real HA only
+        provides on TimestampDataUpdateCoordinator — the plain coordinator
+        would make the diagnostics download crash with AttributeError.
+        """
+        from homeassistant.helpers.update_coordinator import (
+            TimestampDataUpdateCoordinator,
+        )
+
+        from custom_components.ha_ledvance_lights.coordinator import (
+            LedvanceDataUpdateCoordinator,
+        )
+
+        assert issubclass(LedvanceDataUpdateCoordinator, TimestampDataUpdateCoordinator)
 
 
 class TestAdaptivePolling:
