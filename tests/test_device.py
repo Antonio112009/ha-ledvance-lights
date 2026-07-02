@@ -1,12 +1,20 @@
 """Tests for tuya.device module."""
 
 import json
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 from custom_components.ha_ledvance_lights.tuya.device import (
     ERR_CONNECT,
     ERR_OFFLINE,
     TuyaDevice,
     _error_json,
+)
+from custom_components.ha_ledvance_lights.tuya.message import (
+    DP_QUERY_NEW,
+    PREFIX_6699,
+    TuyaMessage,
+    pack_message,
 )
 
 
@@ -117,3 +125,79 @@ class TestTuyaDeviceConnection:
         _cmd, payload = dev._build_payload(0x07, {"22": 500})
         data = json.loads(payload)
         assert data["dps"]["22"] == 500
+
+
+class _FakeSocket:
+    """Socket stub serving from a buffer; counts reads past the end."""
+
+    def __init__(self, data: bytes) -> None:
+        self._buffer = data
+        self.reads_past_end = 0
+
+    def recv(self, num_bytes: int) -> bytes:
+        if not self._buffer:
+            # A real socket would block here until the timeout fires.
+            self.reads_past_end += 1
+            raise TimeoutError
+        chunk = self._buffer[:num_bytes]
+        self._buffer = self._buffer[num_bytes:]
+        return chunk
+
+    def close(self) -> None:
+        pass
+
+
+class TestReceive6699:
+    """The v3.5 receive path must read exactly one frame — no over-read."""
+
+    KEY = b"0123456789abcdef"
+
+    def test_receive_reads_exact_frame_length(self):
+        """An over-read would block until the socket timeout on every poll."""
+        dev = TuyaDevice("id", "1.2.3.4", self.KEY.decode(), version="3.5")
+        packed = pack_message(
+            TuyaMessage(
+                seqno=2,
+                cmd=DP_QUERY_NEW,
+                retcode=0,
+                payload=b'{"dps":{"20":true}}',
+                crc=0,
+                crc_good=True,
+                prefix=PREFIX_6699,
+                iv=bytes(range(12)),
+            ),
+            hmac_key=self.KEY,
+        )
+        fake = _FakeSocket(packed)
+        dev._socket = fake
+
+        msg = dev._receive_raw()
+
+        assert msg is not None
+        assert msg.payload == b'{"dps":{"20":true}}'
+        assert fake.reads_past_end == 0
+
+
+class TestSendReceiveSerialization:
+    """Concurrent executor calls must not interleave on the device."""
+
+    def test_send_receive_serialized(self):
+        dev = TuyaDevice("id", "1.2.3.4", "key1234567890abc")
+        active = 0
+        max_active = 0
+
+        def fake_exchange(cmd, data=None):
+            nonlocal active, max_active
+            active += 1
+            max_active = max(max_active, active)
+            time.sleep(0.02)
+            active -= 1
+            return {"dps": {}}
+
+        dev._send_receive_locked = fake_exchange
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            results = list(pool.map(lambda _: dev._send_receive(0x0A), range(8)))
+
+        assert all(r == {"dps": {}} for r in results)
+        assert max_active == 1

@@ -181,6 +181,26 @@ class LedvanceLight(CoordinatorEntity[LedvanceDataUpdateCoordinator], LightEntit
             return SCENE_EFFECTS[scene_num - 1]
         return None
 
+    def _current_brightness_tuya(self) -> int:
+        """Return the current brightness on the Tuya scale (10-1000).
+
+        In colour mode the live value is the V component of the HSV hex —
+        DP22 is stale there (the device stops updating it).  Fall back to
+        DP22 for white mode, then to max.
+        """
+        data = self.coordinator.data or {}
+        if data.get(str(DP_MODE)) == "colour":
+            hex_str = data.get(str(DP_COLOR_HSV), "")
+            if isinstance(hex_str, str) and len(hex_str) >= 12:
+                try:
+                    return int(hex_str[8:12], 16)
+                except ValueError:
+                    pass
+        value = data.get(str(DP_BRIGHTNESS))
+        if isinstance(value, int):
+            return value
+        return TUYA_BRIGHTNESS_MAX
+
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn on the light with optional attributes."""
         brightness_tuya: int | None = None
@@ -202,10 +222,7 @@ class LedvanceLight(CoordinatorEntity[LedvanceDataUpdateCoordinator], LightEntit
         if ATTR_HS_COLOR in kwargs:
             h, s = kwargs[ATTR_HS_COLOR]
             # Use provided brightness or current brightness for V component
-            if brightness_tuya is not None:
-                v = brightness_tuya
-            else:
-                v = (self.coordinator.data or {}).get(str(DP_BRIGHTNESS), TUYA_BRIGHTNESS_MAX)
+            v = brightness_tuya if brightness_tuya is not None else self._current_brightness_tuya()
             hsv_hex = hs_to_tuya_hex(h, s, v)
         elif brightness_tuya is not None and self.color_mode == ColorMode.HS:
             # Brightness-only change while in colour mode: update the HSV hex

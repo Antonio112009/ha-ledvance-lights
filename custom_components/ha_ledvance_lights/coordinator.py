@@ -11,7 +11,10 @@ from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.helpers.update_coordinator import (
+    TimestampDataUpdateCoordinator,
+    UpdateFailed,
+)
 
 from .const import (
     CONF_DEVICE_ID,
@@ -40,8 +43,12 @@ _DEBOUNCE_SECONDS = 0.3
 type LedvanceConfigEntry = ConfigEntry[LedvanceDataUpdateCoordinator]
 
 
-class LedvanceDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
-    """Coordinator to poll Ledvance light status via local Tuya protocol."""
+class LedvanceDataUpdateCoordinator(TimestampDataUpdateCoordinator[dict[str, Any]]):
+    """Coordinator to poll Ledvance light status via local Tuya protocol.
+
+    Extends the Timestamp variant because diagnostics reads
+    ``last_update_success_time``, which the plain coordinator lacks.
+    """
 
     config_entry: LedvanceConfigEntry
 
@@ -230,15 +237,31 @@ class LedvanceDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 await task
         await self.hass.async_add_executor_job(self.device.close)
 
+    async def _async_set_power(self, on: bool) -> None:
+        """Set power immediately (not debounced) with optimistic update.
+
+        ``set_status`` reports failure by returning an error dict rather than
+        raising, so check the result — otherwise a failed toggle would leave
+        the wrong optimistic state on screen until the next poll.
+        """
+        self._apply_optimistic_update({str(DP_POWER): on})
+        result = await self.hass.async_add_executor_job(self.device.set_status, on, DP_POWER)
+        if not result or "Error" in result:
+            _LOGGER.warning(
+                "Failed to turn %s device %s: %s",
+                "on" if on else "off",
+                self.device.address,
+                result,
+            )
+            await self.async_request_refresh()
+
     async def async_turn_on(self) -> None:
         """Turn the light on (immediate — not debounced)."""
-        self._apply_optimistic_update({str(DP_POWER): True})
-        await self.hass.async_add_executor_job(self.device.set_status, True, DP_POWER)
+        await self._async_set_power(True)
 
     async def async_turn_off(self) -> None:
         """Turn the light off (immediate — not debounced)."""
-        self._apply_optimistic_update({str(DP_POWER): False})
-        await self.hass.async_add_executor_job(self.device.set_status, False, DP_POWER)
+        await self._async_set_power(False)
 
     async def async_turn_on_with_attrs(
         self,

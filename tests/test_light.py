@@ -310,6 +310,25 @@ class TestAsyncTurnOn:
         )
 
     @pytest.mark.asyncio
+    async def test_with_hs_color_in_colour_mode_uses_hex_v(self, sample_dps_colour):
+        """In colour mode the V component must come from the current HSV hex.
+
+        DP22 is stale in colour mode (the fixture has DP22=800 while the hex
+        carries V=1000) — picking a new colour must not jump brightness to
+        the old white-mode value.
+        """
+        light = _make_light(sample_dps_colour)
+        await light.async_turn_on(hs_color=(240.0, 60.0))
+
+        expected_hex = hs_to_tuya_hex(240.0, 60.0, 1000)  # V from "24" hex
+        light.coordinator.async_turn_on_with_attrs.assert_awaited_once_with(
+            brightness=None,
+            color_temp=None,
+            hsv_hex=expected_hex,
+            scene_num=None,
+        )
+
+    @pytest.mark.asyncio
     async def test_with_effect(self, sample_dps):
         light = _make_light(sample_dps)
         await light.async_turn_on(effect="Scene 3")

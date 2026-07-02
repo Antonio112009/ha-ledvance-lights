@@ -8,6 +8,7 @@ import logging
 import os
 import socket
 import struct
+import threading
 import time
 from typing import Any
 
@@ -17,20 +18,19 @@ from .message import (
     CONTROL_NEW,
     DP_QUERY,
     DP_QUERY_NEW,
-    FOOTER_6699,
     NO_PROTOCOL_HEADER_CMDS,
     PREFIX_55AA,
-    PREFIX_55AA_BIN,
     PREFIX_6699,
-    PREFIX_6699_BIN,
     PROTOCOL_33_HEADER,
     PROTOCOL_34_HEADER,
     PROTOCOL_35_HEADER,
     SESS_KEY_NEG_FINISH,
     SESS_KEY_NEG_START,
+    SUFFIX_SIZE,
     DecodeError,
     TuyaMessage,
     _hmac_sha256,
+    find_prefix,
     pack_message,
     parse_header,
     unpack_message,
@@ -84,6 +84,11 @@ class TuyaDevice:
         self._seqno = 1
         self._timeout = 5
         self._retry_limit = 1
+
+        # Serializes all network exchanges: the coordinator can invoke a poll,
+        # an immediate on/off, and a debounced command from separate executor
+        # threads, and the shared socket/seqno/session state is not re-entrant.
+        self._io_lock = threading.Lock()
 
         # Version-specific header
         self._version_header = self._get_version_header()
@@ -149,18 +154,19 @@ class TuyaDevice:
 
     def close(self) -> None:
         """Public alias for closing the socket (safe to call from executor)."""
-        self._close()
+        with self._io_lock:
+            self._close()
 
     def _negotiate_session_key(self) -> bool:
         """Three-step session key handshake for v3.4+."""
         try:
             local_nonce = os.urandom(16)
 
-            # Step 1: Send local nonce
+            # Step 1: Send local nonce.  v3.5 requests carry no retcode.
             msg = TuyaMessage(
                 seqno=self._next_seqno(),
                 cmd=SESS_KEY_NEG_START,
-                retcode=0,
+                retcode=0 if self.version < 3.5 else None,
                 payload=local_nonce,
                 crc=0,
                 crc_good=True,
@@ -198,7 +204,7 @@ class TuyaDevice:
             msg = TuyaMessage(
                 seqno=self._next_seqno(),
                 cmd=SESS_KEY_NEG_FINISH,
-                retcode=0,
+                retcode=0 if self.version < 3.5 else None,
                 payload=our_hmac,
                 crc=0,
                 crc_good=True,
@@ -210,8 +216,9 @@ class TuyaDevice:
             xored = bytes(a ^ b for a, b in zip(local_nonce, remote_nonce, strict=False))
 
             if self.version >= 3.5:
+                # The 16-byte GCM ciphertext of the XOR'd nonces (no AAD).
                 _, ct, _ = aes_gcm_encrypt(self.local_key, xored, iv=local_nonce[:12])
-                self._session_key = ct[12:28] if len(ct) >= 28 else ct[:16]
+                self._session_key = ct
             else:
                 self._session_key = aes_ecb_encrypt(self.local_key, xored, pad=False)
 
@@ -247,27 +254,17 @@ class TuyaDevice:
             if not data:
                 return None
 
-            # Find prefix
-            prefix_offset = -1
-            for i in range(len(data) - 3):
-                if data[i : i + 4] in (PREFIX_55AA_BIN, PREFIX_6699_BIN):
-                    prefix_offset = i
-                    break
-
-            if prefix_offset < 0:
-                return None
-
+            _, prefix_offset = find_prefix(data)
             data = data[prefix_offset:]
 
-            # Parse header to find total length
+            # Parse header to find total length.  The 55AA length field
+            # already covers the footer; the 6699 one covers IV+payload+tag,
+            # so only the 4-byte suffix remains.
             prefix, _seqno, _cmd, payload_len, header_size = parse_header(data)
 
+            total_len = header_size + payload_len
             if prefix == PREFIX_6699:
-                total_len = header_size + payload_len + FOOTER_6699
-            elif self._session_key and self.version >= 3.4:
-                total_len = header_size + payload_len
-            else:
-                total_len = header_size + payload_len
+                total_len += SUFFIX_SIZE
 
             # Read more if needed
             if len(data) < total_len:
@@ -346,13 +343,14 @@ class TuyaDevice:
         key = self._encrypt_key
 
         if self.version >= 3.5:
-            # v3.5: GCM encryption via pack_message
+            # v3.5: GCM encryption via pack_message.  Client requests carry
+            # no retcode on the wire.
             if cmd not in NO_PROTOCOL_HEADER_CMDS:
                 payload = self._version_header + payload
             msg = TuyaMessage(
                 seqno=self._next_seqno(),
                 cmd=cmd,
-                retcode=0,
+                retcode=None,
                 payload=payload,
                 crc=0,
                 crc_good=True,
@@ -450,7 +448,16 @@ class TuyaDevice:
     # ─────────────────────────────────────────
 
     def _send_receive(self, cmd: int, data: dict | None = None) -> dict:
-        """Connect, send command, receive response, close. Returns parsed dict."""
+        """Connect, send command, receive response, close. Returns parsed dict.
+
+        Serialized with a lock so concurrent executor threads (poll vs.
+        command) cannot interleave on the shared socket and session state.
+        """
+        with self._io_lock:
+            return self._send_receive_locked(cmd, data)
+
+    def _send_receive_locked(self, cmd: int, data: dict | None = None) -> dict:
+        """Do the actual exchange. Caller must hold ``_io_lock``."""
         for attempt in range(self._retry_limit + 1):
             try:
                 if not self._connect():

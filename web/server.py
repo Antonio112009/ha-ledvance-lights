@@ -112,7 +112,9 @@ async def api_brightness(request: web.Request) -> web.Response:
     dev = _get_device(data)
     ha_val = int(data["value"])
     tuya_val = ha_brightness_to_tuya(ha_val)
-    result = await asyncio.get_running_loop().run_in_executor(None, dev.set_value, DP_BRIGHTNESS, tuya_val)
+    result = await asyncio.get_running_loop().run_in_executor(
+        None, dev.set_value, DP_BRIGHTNESS, tuya_val
+    )
     return web.json_response(result)
 
 
@@ -166,17 +168,21 @@ async def api_detect_version(request: web.Request) -> web.Response:
         dev.set_socketRetryLimit(1)
         result = await asyncio.get_running_loop().run_in_executor(None, dev.status)
         if result and "dps" in result:
-            return web.json_response({
-                "version": ver,
-                "hint": hint,
-                "status": result,
-            })
+            return web.json_response(
+                {
+                    "version": ver,
+                    "hint": hint,
+                    "status": result,
+                }
+            )
 
-    return web.json_response({
-        "version": None,
-        "hint": hint,
-        "error": "Could not connect with any version. Check device ID and local key.",
-    })
+    return web.json_response(
+        {
+            "version": None,
+            "hint": hint,
+            "error": "Could not connect with any version. Check device ID and local key.",
+        }
+    )
 
 
 @routes.post("/api/scan")
