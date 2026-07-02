@@ -1,10 +1,12 @@
 name: CI
 
+# Branch flow: feature branches -> development -> main.
+# PRs into either long-lived branch and pushes to them run the checks.
 on:
   push:
-    branches: [main]
+    branches: [main, development]
   pull_request:
-    branches: [main]
+    branches: [main, development]
 
 jobs:
   test:
