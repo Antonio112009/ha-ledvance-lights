@@ -115,20 +115,7 @@ def _format_device_status(dps: dict[str, Any] | None) -> dict[str, Any]:
         formatted["music_mode"] = "ON" if music else "OFF"
 
     # Include any unknown DPs
-    known_dps = {
-        str(dp)
-        for dp in (
-            DP_POWER,
-            DP_MODE,
-            DP_BRIGHTNESS,
-            DP_COLOR_TEMP,
-            DP_COLOR_HSV,
-            DP_SCENE,
-            DP_SCENE_NUM,
-            DP_MUSIC,
-        )
-    }
-    unknown = {k: v for k, v in dps.items() if k not in known_dps}
+    unknown = {k: v for k, v in dps.items() if k not in DP_NAMES}
     if unknown:
         formatted["unknown_dps"] = unknown
 
@@ -152,7 +139,7 @@ async def async_get_config_entry_diagnostics(
 
     if coordinator.last_update_success_time:
         health["last_successful_update"] = coordinator.last_update_success_time.isoformat()
-    if hasattr(coordinator, "last_exception") and coordinator.last_exception:
+    if coordinator.last_exception:
         health["last_error"] = str(coordinator.last_exception)
 
     # Adaptive polling state
@@ -164,19 +151,7 @@ async def async_get_config_entry_diagnostics(
     # Count known vs unknown DPs
     dp_summary: dict[str, Any] = {}
     if coordinator.data:
-        known_dp_keys = {
-            str(dp)
-            for dp in (
-                DP_POWER,
-                DP_MODE,
-                DP_BRIGHTNESS,
-                DP_COLOR_TEMP,
-                DP_COLOR_HSV,
-                DP_SCENE,
-                DP_SCENE_NUM,
-                DP_MUSIC,
-            )
-        }
+        known_dp_keys = set(DP_NAMES)
         all_keys = set(coordinator.data.keys())
         dp_summary = {
             "total": len(all_keys),

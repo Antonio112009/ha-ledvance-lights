@@ -39,7 +39,8 @@ def _make_coordinator(mock_tuya_device, mock_entry_data):
 
     with (
         patch(
-            "custom_components.ha_ledvance_lights.coordinator.DataUpdateCoordinator.__init__",
+            "custom_components.ha_ledvance_lights.coordinator."
+            "TimestampDataUpdateCoordinator.__init__",
             return_value=None,
         ),
         patch(
@@ -352,6 +353,64 @@ class TestAsyncTurnOn:
         coordinator.async_set_updated_data.assert_called_once()
         updated = coordinator.async_set_updated_data.call_args[0][0]
         assert updated[str(DP_POWER)] is True
+
+
+class TestSetPowerFailureHandling:
+    """A failed set_status returns an error dict — the UI must reconcile."""
+
+    @pytest.mark.asyncio
+    async def test_turn_on_failure_triggers_refresh(self, mock_tuya_device, mock_entry_data):
+        mock_tuya_device.set_status.return_value = {
+            "Error": "Network Error: Unable to Connect",
+            "Err": "901",
+            "Payload": "",
+        }
+        coordinator = _make_coordinator(mock_tuya_device, mock_entry_data)
+
+        await coordinator.async_turn_on()
+
+        coordinator.async_request_refresh.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_turn_off_failure_triggers_refresh(self, mock_tuya_device, mock_entry_data):
+        mock_tuya_device.set_status.return_value = {
+            "Error": "Timeout Waiting for Device",
+            "Err": "902",
+            "Payload": "",
+        }
+        coordinator = _make_coordinator(mock_tuya_device, mock_entry_data)
+
+        await coordinator.async_turn_off()
+
+        coordinator.async_request_refresh.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_turn_on_success_no_refresh(self, mock_tuya_device, mock_entry_data):
+        mock_tuya_device.set_status.return_value = {"dps": {"20": True}}
+        coordinator = _make_coordinator(mock_tuya_device, mock_entry_data)
+
+        await coordinator.async_turn_on()
+
+        coordinator.async_request_refresh.assert_not_awaited()
+
+
+class TestCoordinatorBaseClass:
+    """Diagnostics depends on the Timestamp coordinator variant."""
+
+    def test_subclasses_timestamp_coordinator(self):
+        """Diagnostics reads ``last_update_success_time``, which real HA only
+        provides on TimestampDataUpdateCoordinator — the plain coordinator
+        would make the diagnostics download crash with AttributeError.
+        """
+        from homeassistant.helpers.update_coordinator import (
+            TimestampDataUpdateCoordinator,
+        )
+
+        from custom_components.ha_ledvance_lights.coordinator import (
+            LedvanceDataUpdateCoordinator,
+        )
+
+        assert issubclass(LedvanceDataUpdateCoordinator, TimestampDataUpdateCoordinator)
 
 
 class TestAdaptivePolling:

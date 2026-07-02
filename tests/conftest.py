@@ -87,6 +87,8 @@ def _setup_ha_stubs():
                 cls.domain = domain
 
     # --- DataUpdateCoordinator ---
+    # Mirrors real HA: the plain coordinator has NO last_update_success_time;
+    # only TimestampDataUpdateCoordinator provides it.
     class DataUpdateCoordinator:
         def __init__(
             self,
@@ -103,7 +105,7 @@ def _setup_ha_stubs():
             self.config_entry = config_entry
             self.data = None
             self.last_update_success = True
-            self.last_update_success_time = None
+            self.last_exception = None
 
         async def async_config_entry_first_refresh(self):
             pass
@@ -113,6 +115,9 @@ def _setup_ha_stubs():
 
         def __class_getitem__(cls, item):
             return cls
+
+    class TimestampDataUpdateCoordinator(DataUpdateCoordinator):
+        last_update_success_time = None
 
     class UpdateFailedError(Exception):
         pass
@@ -163,6 +168,7 @@ def _setup_ha_stubs():
         "homeassistant.helpers.update_coordinator",
         {
             "DataUpdateCoordinator": DataUpdateCoordinator,
+            "TimestampDataUpdateCoordinator": TimestampDataUpdateCoordinator,
             "UpdateFailed": UpdateFailedError,
             "CoordinatorEntity": CoordinatorEntity,
         },

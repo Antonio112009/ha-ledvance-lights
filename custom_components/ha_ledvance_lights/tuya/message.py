@@ -5,6 +5,7 @@ from __future__ import annotations
 import binascii
 import hashlib
 import hmac
+import os
 import struct
 from dataclasses import dataclass
 
@@ -75,11 +76,15 @@ class DecodeError(Exception):
 
 @dataclass
 class TuyaMessage:
-    """Represents a decoded Tuya protocol message."""
+    """Represents a decoded Tuya protocol message.
+
+    ``retcode`` is None for client-originated messages (requests carry no
+    retcode on the wire) and an int for device responses.
+    """
 
     seqno: int
     cmd: int
-    retcode: int
+    retcode: int | None
     payload: bytes
     crc: bytes | int
     crc_good: bool
@@ -129,26 +134,26 @@ def _pack_55aa(msg: TuyaMessage, hmac_key: bytes | None) -> bytes:
 
 
 def _pack_6699(msg: TuyaMessage, key: bytes) -> bytes:
-    """Pack a 0x6699-prefix message (v3.5 GCM)."""
-    payload = msg.payload
+    """Pack a 0x6699-prefix message (v3.5 GCM).
 
-    # Retcode prefix
+    The header minus the 4-byte prefix is authenticated as GCM AAD, and the
+    retcode is only packed when present (client requests carry none) — both
+    matching the reference Tuya protocol.
+    """
+    payload = msg.payload
     if msg.retcode is not None:
         payload = struct.pack(RETCODE_FMT, msg.retcode) + payload
 
-    # Build nonce for GCM
-    nonce = msg.iv if msg.iv else b"\x00" * 12
+    nonce = msg.iv if msg.iv else os.urandom(12)
 
-    # Encrypt with GCM — AAD is header from byte 4 onwards + cmd bytes
-    # We need to know the total structure to compute AAD
-    iv, ciphertext, tag = aes_gcm_encrypt(key, payload, iv=nonce, aad=None)
-
-    # Payload area = IV + ciphertext + tag
-    encrypted_blob = iv + ciphertext + tag
-    length = len(encrypted_blob)
-
+    # Length covers IV + ciphertext + tag; GCM keeps ciphertext == plaintext,
+    # so the header can be built (and authenticated as AAD) before encrypting.
+    length = 12 + len(payload) + GCM_TAG_SIZE
     header = struct.pack(HEADER_FMT_6699, PREFIX_6699, 0, msg.seqno, msg.cmd, length)
-    return header + encrypted_blob + struct.pack(">I", SUFFIX_6699)
+
+    iv, ciphertext, tag = aes_gcm_encrypt(key, payload, iv=nonce, aad=header[4:])
+
+    return header + iv + ciphertext + tag + struct.pack(">I", SUFFIX_6699)
 
 
 # ─────────────────────────────────────────────
@@ -276,7 +281,8 @@ def _unpack_6699(
     ciphertext = blob[12:-GCM_TAG_SIZE]
 
     try:
-        plaintext = aes_gcm_decrypt(key, ciphertext, iv, tag)
+        # The header minus the 4-byte prefix is authenticated as AAD.
+        plaintext = aes_gcm_decrypt(key, ciphertext, iv, tag, aad=data[4:header_size])
     except Exception as exc:
         raise DecodeError(f"GCM decryption failed: {exc}") from exc
 

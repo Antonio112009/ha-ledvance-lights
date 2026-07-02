@@ -1,8 +1,14 @@
 """Tests for tuya.scanner module."""
 
+import json
+import socket
+import time
+
 from custom_components.ha_ledvance_lights.tuya.scanner import (
+    UDP_PORT_31,
     _extract_device_info,
     _parse_network,
+    _udp_listen_for_devices,
 )
 
 
@@ -93,3 +99,36 @@ class TestExtractDeviceInfo:
         assert info["version"] == "3.3"
         assert info["product_key"] == ""
         assert info["encrypted"] is False
+
+
+class TestUdpListenLoop:
+    """Tests for the shared UDP listen loop."""
+
+    def test_collects_broadcast_and_honours_deadline(self):
+        """The loop must decode incoming broadcasts and run the full window.
+
+        Uses an ephemeral localhost socket so no fixed discovery port is
+        needed.  Traffic arriving early must not shorten the scan window
+        (the old loop counted iterations, not wall-clock time).
+        """
+        recv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        recv_sock.bind(("127.0.0.1", 0))
+        recv_sock.setblocking(False)
+        send_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+        payload = json.dumps(
+            {"gwId": "scan_test_id", "ip": "192.168.1.50", "version": "3.3"}
+        ).encode()
+
+        try:
+            send_sock.sendto(payload, recv_sock.getsockname())
+            start = time.monotonic()
+            devices = _udp_listen_for_devices([(recv_sock, UDP_PORT_31)], timeout=0.4)
+            elapsed = time.monotonic() - start
+        finally:
+            recv_sock.close()
+            send_sock.close()
+
+        assert "scan_test_id" in devices
+        assert devices["scan_test_id"]["ip"] == "192.168.1.50"
+        assert elapsed >= 0.4
