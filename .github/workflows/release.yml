@@ -1,48 +1,163 @@
 name: Release
 
-# CD: merging development into main with a bumped manifest version
-# publishes the release automatically (tag v{version} + GitHub release).
-# If the version was not bumped, the push to main releases nothing.
 on:
-  push:
+  pull_request:
+    types: [closed]
     branches: [main]
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 permissions:
   contents: write
 
 jobs:
-  release:
+  bump-version:
+    if: >
+      github.event.pull_request.merged == true
+      && github.event.pull_request.head.ref == 'development'
+      && !contains(github.event.pull_request.labels.*.name, 'no-release')
     runs-on: ubuntu-latest
-
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_TOKEN }}
 
-      - name: Read version from manifest
-        id: version
-        run: |
-          version=$(jq -r .version custom_components/ha_ledvance_lights/manifest.json)
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "Manifest version: $version"
-
-      - name: Check whether v${{ steps.version.outputs.version }} is already released
-        id: released
+      - name: Validate release label
+        id: bump
         env:
-          GH_TOKEN: ${{ github.token }}
+          LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
         run: |
-          if gh release view "v${{ steps.version.outputs.version }}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "Release v${{ steps.version.outputs.version }} already exists — nothing to do."
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
+          count=$(echo "$LABELS" | jq '[.[] | select(. == "major" or . == "minor" or . == "patch")] | length')
+
+          if [ "$count" -ne 1 ]; then
+            echo "::error::Merged PRs to main must have exactly one version label: major, minor, or patch."
+            exit 1
           fi
 
-      - name: Create release v${{ steps.version.outputs.version }}
-        if: steps.released.outputs.exists == 'false'
+          part=$(echo "$LABELS" | jq -r '[.[] | select(. == "major" or . == "minor" or . == "patch")][0]')
+          echo "part=${part}" >> "$GITHUB_OUTPUT"
+
+      - name: Detect existing release bump
+        id: state
         env:
-          GH_TOKEN: ${{ github.token }}
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
         run: |
-          gh release create "v${{ steps.version.outputs.version }}" \
-            --repo "$GITHUB_REPOSITORY" \
-            --target "$GITHUB_SHA" \
-            --title "v${{ steps.version.outputs.version }}" \
-            --generate-notes
+          head_message=$(git log -1 --format=%s main)
+          if printf '%s\n' "$head_message" | grep -qE '^Bump version to '; then
+            version=$(jq -r .version custom_components/ha_ledvance_lights/manifest.json)
+            echo "released=true" >> "$GITHUB_OUTPUT"
+            echo "version=${version}" >> "$GITHUB_OUTPUT"
+            echo "Main already points at release version ${version}."
+            exit 0
+          fi
+
+          first_descendant=$(git rev-list --ancestry-path --reverse "${MERGE_SHA}..main" | head -n 1)
+          if [ -n "$first_descendant" ]; then
+            first_message=$(git log -1 --format=%s "$first_descendant")
+            if printf '%s\n' "$first_message" | grep -qE '^Bump version to '; then
+              echo "released=true" >> "$GITHUB_OUTPUT"
+              echo "version=${first_message#Bump version to }" >> "$GITHUB_OUTPUT"
+              echo "Found existing release bump for this merge."
+              exit 0
+            fi
+          fi
+
+          echo "released=false" >> "$GITHUB_OUTPUT"
+
+      - name: Determine release version
+        id: version
+        run: |
+          if [ "${{ steps.state.outputs.released }}" = "true" ]; then
+            echo "version=${{ steps.state.outputs.version }}" >> "$GITHUB_OUTPUT"
+            echo "Reusing version ${{ steps.state.outputs.version }}"
+            exit 0
+          fi
+
+          CURRENT=$(jq -r .version custom_components/ha_ledvance_lights/manifest.json)
+          IFS='.' read -r major minor patch <<< "$CURRENT"
+
+          PART="${{ steps.bump.outputs.part }}"
+          if [ "$PART" = "major" ]; then
+            major=$((major + 1)); minor=0; patch=0
+          elif [ "$PART" = "minor" ]; then
+            minor=$((minor + 1)); patch=0
+          else
+            patch=$((patch + 1))
+          fi
+
+          NEW="${major}.${minor}.${patch}"
+
+          # Keep all three version files in sync
+          jq --arg v "$NEW" '.version = $v' custom_components/ha_ledvance_lights/manifest.json > manifest.tmp
+          mv manifest.tmp custom_components/ha_ledvance_lights/manifest.json
+          sed -i "s/^VERSION = \"${CURRENT}\"/VERSION = \"${NEW}\"/" custom_components/ha_ledvance_lights/const.py
+          sed -i "s/^version = \"${CURRENT}\"/version = \"${NEW}\"/" pyproject.toml
+
+          echo "version=${NEW}" >> "$GITHUB_OUTPUT"
+          echo "Bumped $CURRENT -> $NEW ($PART)"
+
+      - name: Commit and tag
+        if: steps.state.outputs.released != 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add custom_components/ha_ledvance_lights/manifest.json \
+                  custom_components/ha_ledvance_lights/const.py \
+                  pyproject.toml
+          git commit -m "Bump version to ${{ steps.version.outputs.version }}"
+          git tag "v${{ steps.version.outputs.version }}"
+          git push origin main "refs/tags/v${{ steps.version.outputs.version }}"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          if gh release view "v${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
+            echo "GitHub release already exists for v${{ steps.version.outputs.version }}."
+          else
+            gh release create "v${{ steps.version.outputs.version }}" \
+              --title "v${{ steps.version.outputs.version }}" \
+              --generate-notes
+          fi
+
+  sync-development:
+    needs: bump-version
+    # Run for no-release merges too (bump-version is skipped then), so the
+    # merge commit on main always flows back into development.
+    if: >
+      always()
+      && github.event.pull_request.merged == true
+      && github.event.pull_request.head.ref == 'development'
+      && (needs.bump-version.result == 'success' || needs.bump-version.result == 'skipped')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: development
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_TOKEN }}
+
+      - name: Merge main into development
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # Retry so a racing push to development can't leave the version
+          # bump stranded on main.
+          for attempt in 1 2 3; do
+            git fetch origin main development
+            git reset --hard origin/development
+            git merge origin/main --no-edit
+            if git push origin development; then
+              exit 0
+            fi
+            echo "Push rejected (attempt ${attempt}); retrying."
+            sleep 5
+          done
+          echo "::error::Failed to sync development with main after 3 attempts."
+          exit 1
