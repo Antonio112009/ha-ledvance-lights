@@ -8,12 +8,14 @@ import hashlib
 import ipaddress
 import json
 import logging
+import os
 import platform
 import re
 import select
 import socket
 import struct
 import subprocess
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 from .crypto import aes_ecb_decrypt, aes_gcm_decrypt
@@ -67,18 +69,22 @@ def _create_udp_socket(port: int) -> socket.socket | None:
 
 
 def _send_discovery_broadcast(sock: socket.socket) -> None:
-    """Send a v3.5 REQ_DEVINFO broadcast to trigger device responses."""
+    """Send a v3.5 REQ_DEVINFO broadcast to trigger device responses.
+
+    Client requests carry no retcode, and the GCM nonce must be fresh per
+    message — both matching the reference protocol.
+    """
     payload = json.dumps({"from": "app", "ip": "0.0.0.0"}).encode()
 
     msg = TuyaMessage(
         seqno=0,
         cmd=REQ_DEVINFO,
-        retcode=0,
+        retcode=None,
         payload=payload,
         crc=0,
         crc_good=True,
         prefix=PREFIX_6699,
-        iv=b"\x00" * 12,
+        iv=os.urandom(12),
     )
 
     packed = pack_message(msg, hmac_key=UDP_KEY)
@@ -136,7 +142,8 @@ def _decode_app_broadcast(data: bytes) -> dict | None:
         iv = blob[:12]
         tag = blob[-GCM_TAG_SIZE:]
         ciphertext = blob[12:-GCM_TAG_SIZE]
-        plaintext = aes_gcm_decrypt(UDP_KEY, ciphertext, iv, tag)
+        # The header minus the 4-byte prefix is authenticated as AAD.
+        plaintext = aes_gcm_decrypt(UDP_KEY, ciphertext, iv, tag, aad=data[4:header_size])
         if len(plaintext) >= 4:
             retcode = struct.unpack(">I", plaintext[:4])[0]
             if retcode in (0, 1, 2, 3):
@@ -212,19 +219,6 @@ async def _async_probe_ip(
                 await writer.wait_closed()
 
     return None
-
-
-def _probe_ip(ip: str) -> dict | None:
-    """Probe a single IP for a Tuya device (sync wrapper for legacy callers)."""
-    probe = _build_probe_packet()
-    sem = asyncio.Semaphore(1)
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(_async_probe_ip(ip, sem, probe))
-    # If already in an event loop, run in a new thread
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(asyncio.run, _async_probe_ip(ip, sem, probe)).result()
 
 
 def _is_tuya_response(data: bytes) -> bool:
@@ -657,6 +651,92 @@ def detect_version(ip: str, timeout: float = 2.0) -> str:
 
 
 # ─────────────────────────────────────────────
+#  UDP scan core
+# ─────────────────────────────────────────────
+
+# How often to re-send the v3.5 discovery broadcast during a scan.
+_BROADCAST_INTERVAL = 3.0
+
+
+def _udp_listen_for_devices(
+    sockets: list[tuple[socket.socket, int]],
+    timeout: float,
+) -> dict[str, dict]:
+    """Collect device broadcasts from the given sockets until *timeout*.
+
+    Uses a monotonic deadline so a busy network (select returning early)
+    cannot shrink the scan window.  Re-broadcasts the v3.5 discovery
+    request periodically to keep triggering device responses.
+    """
+    devices: dict[str, dict] = {}
+    start = time.monotonic()
+    deadline = start + timeout
+    next_broadcast = start + _BROADCAST_INTERVAL
+
+    while True:
+        now = time.monotonic()
+        if now >= deadline:
+            break
+
+        readable, _, _ = select.select(
+            [s for s, _ in sockets],
+            [],
+            [],
+            min(0.5, deadline - now),
+        )
+
+        for sock in readable:
+            port = next(p for s, p in sockets if s is sock)
+            try:
+                data, _addr = sock.recvfrom(4096)
+            except OSError:
+                continue
+            broadcast = _decode_broadcast(data, port)
+            if broadcast:
+                info = _extract_device_info(broadcast)
+                if info and info["id"] not in devices:
+                    _LOGGER.debug(
+                        "UDP: Discovered %s at %s (v%s)",
+                        info["id"],
+                        info["ip"],
+                        info["version"],
+                    )
+                    devices[info["id"]] = info
+
+        if time.monotonic() >= next_broadcast:
+            next_broadcast = time.monotonic() + _BROADCAST_INTERVAL
+            for sock, port in sockets:
+                if port == UDP_PORT_APP:
+                    _send_discovery_broadcast(sock)
+
+    return devices
+
+
+def _run_udp_scan(timeout: float) -> dict[str, dict]:
+    """Bind the discovery ports, broadcast, and listen for *timeout* seconds."""
+    sockets: list[tuple[socket.socket, int]] = []
+    for port in (UDP_PORT_31, UDP_PORT_33, UDP_PORT_APP):
+        sock = _create_udp_socket(port)
+        if sock:
+            sockets.append((sock, port))
+
+    if not sockets:
+        _LOGGER.warning("Could not bind to any UDP discovery port")
+        return {}
+
+    for sock, port in sockets:
+        if port == UDP_PORT_APP:
+            _send_discovery_broadcast(sock)
+
+    try:
+        return _udp_listen_for_devices(sockets, timeout)
+    finally:
+        for sock, _ in sockets:
+            with contextlib.suppress(OSError):
+                sock.close()
+
+
+# ─────────────────────────────────────────────
 #  UDP-only scan (lightweight, for HA config flow)
 # ─────────────────────────────────────────────
 
@@ -668,64 +748,7 @@ def scan_devices_udp(timeout: float = 8.0) -> list[dict]:
     It only discovers devices on the same network (same broadcast domain).
     Returns a list of dicts with keys: id, ip, version, product_key.
     """
-    devices: dict[str, dict] = {}
-
-    sockets: list[tuple[socket.socket, int]] = []
-    for port in (UDP_PORT_31, UDP_PORT_33, UDP_PORT_APP):
-        sock = _create_udp_socket(port)
-        if sock:
-            sockets.append((sock, port))
-
-    if not sockets:
-        _LOGGER.warning("Could not bind to any UDP discovery port")
-        return []
-
-    for sock, port in sockets:
-        if port == UDP_PORT_APP:
-            _send_discovery_broadcast(sock)
-
-    try:
-        elapsed = 0.0
-        poll_interval = 0.5
-
-        while elapsed < timeout:
-            readable, _, _ = select.select(
-                [s for s, _ in sockets],
-                [],
-                [],
-                min(poll_interval, timeout - elapsed),
-            )
-
-            for sock in readable:
-                port = next(p for s, p in sockets if s is sock)
-                try:
-                    data, _addr = sock.recvfrom(4096)
-                    broadcast = _decode_broadcast(data, port)
-                    if broadcast:
-                        info = _extract_device_info(broadcast)
-                        if info and info["id"] not in devices:
-                            _LOGGER.debug(
-                                "UDP: Discovered %s at %s (v%s)",
-                                info["id"],
-                                info["ip"],
-                                info["version"],
-                            )
-                            devices[info["id"]] = info
-                except OSError:
-                    pass
-
-            elapsed += poll_interval
-
-            if elapsed % 3.0 < poll_interval:
-                for sock, port in sockets:
-                    if port == UDP_PORT_APP:
-                        _send_discovery_broadcast(sock)
-    finally:
-        for sock, _ in sockets:
-            with contextlib.suppress(OSError):
-                sock.close()
-
-    return list(devices.values())
+    return list(_run_udp_scan(timeout).values())
 
 
 # ─────────────────────────────────────────────
@@ -747,63 +770,8 @@ def scan_devices(
     Returns a list of dicts with keys: id, ip, version, product_key.
     This is a blocking call — run it in an executor for async contexts.
     """
-    devices: dict[str, dict] = {}
-
     # ── UDP broadcast scan (same network) ──
-    sockets: list[tuple[socket.socket, int]] = []
-
-    for port in (UDP_PORT_31, UDP_PORT_33, UDP_PORT_APP):
-        sock = _create_udp_socket(port)
-        if sock:
-            sockets.append((sock, port))
-
-    if sockets:
-        for sock, port in sockets:
-            if port == UDP_PORT_APP:
-                _send_discovery_broadcast(sock)
-
-        try:
-            elapsed = 0.0
-            poll_interval = 0.5
-
-            while elapsed < timeout:
-                readable, _, _ = select.select(
-                    [s for s, _ in sockets],
-                    [],
-                    [],
-                    min(poll_interval, timeout - elapsed),
-                )
-
-                for sock in readable:
-                    port = next(p for s, p in sockets if s is sock)
-                    try:
-                        data, _addr = sock.recvfrom(4096)
-                        broadcast = _decode_broadcast(data, port)
-                        if broadcast:
-                            info = _extract_device_info(broadcast)
-                            if info and info["id"] not in devices:
-                                _LOGGER.debug(
-                                    "UDP: Discovered %s at %s (v%s)",
-                                    info["id"],
-                                    info["ip"],
-                                    info["version"],
-                                )
-                                devices[info["id"]] = info
-                    except OSError:
-                        pass
-
-                elapsed += poll_interval
-
-                if elapsed % 3.0 < poll_interval:
-                    for sock, port in sockets:
-                        if port == UDP_PORT_APP:
-                            _send_discovery_broadcast(sock)
-        finally:
-            for sock, _ in sockets:
-                with contextlib.suppress(OSError):
-                    sock.close()
-    else:
-        _LOGGER.warning("Could not bind to any UDP discovery port")
+    devices = _run_udp_scan(timeout)
 
     # ── TCP probe scan (cross-VLAN) ──
     if network:

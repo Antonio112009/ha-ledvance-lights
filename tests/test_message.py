@@ -7,8 +7,10 @@ import pytest
 from custom_components.ha_ledvance_lights.tuya.message import (
     CONTROL,
     DP_QUERY,
+    DP_QUERY_NEW,
     HEADER_SIZE_55AA,
     PREFIX_55AA,
+    PREFIX_6699,
     SUFFIX_55AA,
     DecodeError,
     TuyaMessage,
@@ -148,6 +150,102 @@ class TestPackUnpack55AA:
         packed = pack_message(msg)
         unpacked = unpack_message(packed)
         assert unpacked.payload == b""
+
+
+class TestPackUnpack6699:
+    """Tests for 6699 (v3.5 GCM) message packing/unpacking.
+
+    The wire-format vectors below were generated with the reference
+    tinytuya 1.17.6 implementation, so these tests pin our framing (header
+    AAD, no retcode in client requests, length field semantics) to the real
+    protocol rather than to our own round-trip.
+    """
+
+    KEY = b"0123456789abcdef"
+    IV = bytes(range(12))
+
+    # tinytuya.pack_message(TuyaMessage(1, DP_QUERY_NEW, None, b"{}", 0, True,
+    #                                   PREFIX_6699, IV), hmac_key=KEY)
+    CLIENT_PACKED = bytes.fromhex(
+        "00006699000000000001000000100000001e000102030405060708090a0b"
+        "8642cb923f4c8a8cfd11f0db64e3112dcccf00009966"
+    )
+
+    # tinytuya.pack_message(TuyaMessage(2, DP_QUERY_NEW, 0,
+    #                                   b'{"dps":{"20":true,"22":500}}',
+    #                                   0, True, PREFIX_6699, IV), hmac_key=KEY)
+    DEVICE_PACKED = bytes.fromhex(
+        "00006699000000000002000000100000003c000102030405060708090a0b"
+        "fd3fc41d65565f469b043d61e2a9800f3aa3258f629f6879454bd0c6df9bd611"
+        "f774689fd8b3a1c6a6ee46d0ed8dabd400009966"
+    )
+
+    def test_client_pack_matches_reference(self):
+        """Client request (no retcode) must match reference bytes exactly."""
+        msg = TuyaMessage(
+            seqno=1,
+            cmd=DP_QUERY_NEW,
+            retcode=None,
+            payload=b"{}",
+            crc=0,
+            crc_good=True,
+            prefix=PREFIX_6699,
+            iv=self.IV,
+        )
+        assert pack_message(msg, hmac_key=self.KEY) == self.CLIENT_PACKED
+
+    def test_unpack_reference_device_response(self):
+        """A device-style response packed by the reference must decode."""
+        unpacked = unpack_message(self.DEVICE_PACKED, hmac_key=self.KEY)
+        assert unpacked.seqno == 2
+        assert unpacked.cmd == DP_QUERY_NEW
+        assert unpacked.retcode == 0
+        assert unpacked.payload == b'{"dps":{"20":true,"22":500}}'
+        assert unpacked.prefix == PREFIX_6699
+
+    def test_roundtrip(self):
+        payload = b'{"dps":{"20":true}}'
+        msg = TuyaMessage(
+            seqno=7,
+            cmd=DP_QUERY_NEW,
+            retcode=None,
+            payload=payload,
+            crc=0,
+            crc_good=True,
+            prefix=PREFIX_6699,
+            iv=self.IV,
+        )
+        packed = pack_message(msg, hmac_key=self.KEY)
+        unpacked = unpack_message(packed, hmac_key=self.KEY)
+        assert unpacked.seqno == 7
+        assert unpacked.payload == payload
+
+    def test_random_iv_when_not_given(self):
+        """Without an explicit IV, packing must not reuse a fixed nonce."""
+        msg = TuyaMessage(
+            seqno=1,
+            cmd=DP_QUERY_NEW,
+            retcode=None,
+            payload=b"{}",
+            crc=0,
+            crc_good=True,
+            prefix=PREFIX_6699,
+            iv=None,
+        )
+        packed_a = pack_message(msg, hmac_key=self.KEY)
+        packed_b = pack_message(msg, hmac_key=self.KEY)
+        assert packed_a[18:30] != packed_b[18:30]
+
+    def test_tampered_header_fails_auth(self):
+        """The header is GCM AAD — altering it must break decryption."""
+        tampered = bytearray(self.DEVICE_PACKED)
+        tampered[8] ^= 0x01  # flip a bit in the seqno field
+        with pytest.raises(DecodeError, match="GCM decryption failed"):
+            unpack_message(bytes(tampered), hmac_key=self.KEY)
+
+    def test_wrong_key_fails(self):
+        with pytest.raises(DecodeError, match="GCM decryption failed"):
+            unpack_message(self.DEVICE_PACKED, hmac_key=b"wrongkey12345678")
 
 
 class TestParseHeader:
